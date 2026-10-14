@@ -7,3 +7,4 @@ bots/*/target/
 .venv/
 submissions/
 __pycache__/
+scouting/

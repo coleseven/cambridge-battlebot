@@ -1,0 +1,9 @@
+.cambc/
+bots/*/.cambc/
+matches/
+replays/
+bots/*/build/
+bots/*/target/
+.venv/
+submissions/
+__pycache__/

@@ -1,0 +1,4 @@
+{
+  "RECALL_HP_FRAC": [0.1, 0.8],
+  "BANK_MIN_GEMS": [1, 40, "int"]
+}

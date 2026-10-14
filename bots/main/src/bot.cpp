@@ -4,6 +4,7 @@
 #include <array>
 #include <iostream>
 #include "random.h"
+#include "params.h"
 #include <cstdint>
 #include <span>
 #include <variant>
@@ -130,7 +131,7 @@ void Bot::play_turn() {
         buy_items();
 
     // Recall immediately when badly hurt away from spawn.
-    if (!at_spawn && me.health() < me.max_health() * 0.35f) {
+    if (!at_spawn && me.health() < me.max_health() * RECALL_HP_FRAC) {
         me.recall();
         return;
     }
@@ -141,7 +142,7 @@ void Bot::play_turn() {
             return;
 
     // Bank any carried gems before farming.
-    if (me.gem_count() > 0) {
+    if (me.gem_count() >= BANK_MIN_GEMS) {
         // Union all altar approach tiles: the field chooses the nearest reachable altar.
         cambc::bitboard goals;
         goals.clear();

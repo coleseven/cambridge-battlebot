@@ -8,3 +8,5 @@ bots/*/target/
 submissions/
 __pycache__/
 scouting/
+.arena/
+bots/sparring-*/

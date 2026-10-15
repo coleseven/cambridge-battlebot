@@ -1,0 +1,10 @@
+// Allow-list for the shared .arena folder (see tools/stignore.txt).
+/jobs/queue
+/jobs/running
+!/results*.jsonl
+!/duel
+!/neat
+!/cgp
+!/runs
+!/jobs
+*

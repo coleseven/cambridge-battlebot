@@ -1,20 +1,61 @@
+// Draft: fixed compositions by team size (mirror picks are allowed, so there is no denial to play around).
+// The draft memory records our body types in pick order so champions can index shared-memory slots.
 #include <cambc.h>
 #include "draft.h"
+#include "params.h"
 #include <algorithm>
-#include <string_view>
+#include <array>
+#include <cstddef>
 #include <vector>
-#include "random.h"
+
+using cambc::champion_draft;
+
+namespace {
+// Ladder meta (14 Oct): Varg, C&I, Stellar, Ren, Tavi/Ryth dominate the top 15.
+constexpr std::array<std::array<champion_draft, 5>, 4> COMPS{{
+    {champion_draft::varg, champion_draft::cassi_and_issac, champion_draft::stellar, champion_draft::ren, champion_draft::tavi},
+    {champion_draft::cassi_and_issac, champion_draft::varg, champion_draft::stellar, champion_draft::ren, champion_draft::ryth},
+    {champion_draft::varg, champion_draft::stellar, champion_draft::ren, champion_draft::ryth, champion_draft::vendetta},
+    {champion_draft::cassi_and_issac, champion_draft::stellar, champion_draft::ren, champion_draft::varg, champion_draft::prism},
+}};
+
+// Physical body types created by a draft pick (C&I creates two bodies).
+void push_bodies(champion_draft pick, std::vector<std::byte>& out) {
+    using cambc::champion_type;
+    auto t = [](champion_type c) { return static_cast<std::byte>(static_cast<int>(c)); };
+    switch (pick) {
+    case champion_draft::ryth: out.push_back(t(champion_type::ryth)); break;
+    case champion_draft::vesper_vale: out.push_back(t(champion_type::vesper_vale)); break;
+    case champion_draft::vendetta: out.push_back(t(champion_type::vendetta)); break;
+    case champion_draft::cassi_and_issac:
+        out.push_back(t(champion_type::cassi));
+        out.push_back(t(champion_type::issac));
+        break;
+    case champion_draft::stellar: out.push_back(t(champion_type::stellar)); break;
+    case champion_draft::prism: out.push_back(t(champion_type::prism)); break;
+    case champion_draft::marcella: out.push_back(t(champion_type::marcella)); break;
+    case champion_draft::willow: out.push_back(t(champion_type::willow)); break;
+    case champion_draft::ren: out.push_back(t(champion_type::ren)); break;
+    case champion_draft::varg: out.push_back(t(champion_type::varg)); break;
+    case champion_draft::tavi: out.push_back(t(champion_type::tavi)); break;
+    }
+}
+} // namespace
 
 void play_draft() {
-    // Choose randomly from the champions our team has not picked.
-    const auto chosen = cambc::draft::current_draft(cambc::team::ally);
-    std::vector<cambc::champion_draft> available;
-    for (int i = 0; i < 11; ++i) { // Released champions only.
-        auto pick = static_cast<cambc::champion_draft>(i);
-        if (std::find(chosen.begin(), chosen.end(), pick) == chosen.end()) available.push_back(pick);
-    }
+    const auto mine = cambc::draft::current_draft(cambc::team::ally);
+    const auto& comp = COMPS[static_cast<std::size_t>(DRAFT_COMP) % COMPS.size()];
 
-    // Draft memory starts at byte zero and is copied to each champion.
-    cambc::draft_memory = std::string_view("hello world");
-    cambc::draft::pick(available.at(random_number(available.size())));
+    champion_draft pick = comp[0];
+    for (auto c : comp)
+        if (std::find(mine.begin(), mine.end(), c) == mine.end()) { pick = c; break; }
+
+    // Byte 0 = magic, byte 1 = body count, then body champion_type ids in pick order.
+    std::vector<std::byte> bodies;
+    for (auto c : mine) push_bodies(c, bodies);
+    push_bodies(pick, bodies);
+    std::vector<std::byte> mem{std::byte{0xB7}, static_cast<std::byte>(bodies.size())};
+    mem.insert(mem.end(), bodies.begin(), bodies.end());
+    cambc::draft_memory = mem;
+    cambc::draft::pick(pick);
 }

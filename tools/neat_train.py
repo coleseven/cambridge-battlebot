@@ -258,6 +258,31 @@ def load_state(path):
     return st
 
 
+def seed_rows(seed_from, min_vs_prior=0.0):
+    """Per-hero seed weights: the CMA run's row where it beats the hand prior (row mean of the
+    run's matrix vs prior >= min_vs_prior), otherwise the prior row. Returns {pick: weights}."""
+    import numpy as np
+    learned = duel_train.current_mean(pickle.loads((duel_train.OUT / seed_from / "state.pkl").read_bytes()))
+    prior = duel_train.prior_matrix()
+    mpath = duel_train.OUT / f"matrix_{seed_from}_vsprior.json"
+    vs = None
+    if mpath.exists():
+        tab = json.loads(mpath.read_text())["table"]
+        vs = {p: sum(tab[p]) / len(tab[p]) for p in range(len(PICKS))}
+    out = {}
+    for p, rows in ROWS.items():
+        use_learned = vs is None or vs[p] >= min_vs_prior
+        out[p] = np.mean([(learned if use_learned else prior)[r][:NF] for r in rows], axis=0)
+        print(f"  seed {PICKS[p]:9} <- {'learned' if use_learned else 'prior'}"
+              + (f" (vs prior {vs[p]:+.1f})" if vs else ""), flush=True)
+    return out
+
+
+def anchor_bot(slot_dir, resign):
+    """Fixed reference opponent: a network bot with no programs, i.e. the hand-prior linear scorer."""
+    return patch(slot_dir, blob({}, resign), "anchor")
+
+
 def map_path(layout, a, b):
     return arena.ROOT / "maps_duel" / "1v1" / f"{layout}__{PICKS[a]}-{PICKS[b]}.map26a"
 
@@ -282,19 +307,18 @@ def run(a):
         st = load_state(ck)
         print(f"resuming at generation {st['gen']}", flush=True)
     else:
-        import numpy as np
-        seed = duel_train.current_mean(pickle.loads((duel_train.OUT / a.seed_from / "state.pkl").read_bytes()))
+        seeds = seed_rows(a.seed_from)
         st = {"gen": 0, "pops": {}, "elites": {}, "phase": {}, "seed_from": a.seed_from}
         for p, rows in ROWS.items():
             pop = neat.Population(make_config(d, a.pop, f"_{PICKS[p]}"))   # own config: own phase
-            w = np.mean([seed[r] for r in rows], axis=0)
-            seed_population(pop, config, w, rng)
+            seed_population(pop, config, seeds[p], rng)
             st["pops"][p] = pop
             st["phase"][p] = {"mode": "complexify", "floor": complexity(pop), "best": 0.0, "stall": 0}
             st["elites"][p] = next(iter(pop.population.values()))   # seed genome = linear policy
         print(f"seeded {len(ROWS)} populations from {a.seed_from}", flush=True)
-    slots = build_slots(a.slots + 1)
-    elite_slot, cand_slots = slots[0], slots[1:]
+    slots = build_slots(a.slots + 2)
+    elite_slot, anchor = slots[0], anchor_bot(slots[1], a.resign)
+    cand_slots = slots[2:]
     log = d / "log.jsonl"
 
     for _ in range(a.gens):
@@ -324,9 +348,10 @@ def run(a):
                             g.fitness = -50.0
                             continue
                         bot = patch(slot, blob({r: prog for r in ROWS[p]}, a.resign), f"g{gid}")
-                        for q in opps:
-                            games.append((bot, elite_bot, map_path(layout, p, q))); meta.append((g, 0))
-                            games.append((elite_bot, bot, map_path(layout, q, p))); meta.append((g, 1))
+                        for j, q in enumerate(opps):   # first half vs evolving elites, second half vs the fixed anchor
+                            opp = elite_bot if j < (len(opps) + 1) // 2 else anchor
+                            games.append((bot, opp, map_path(layout, p, q))); meta.append((g, 0))
+                            games.append((opp, bot, map_path(layout, q, p))); meta.append((g, 1))
                     res = arena.play_many(games, a.jobs)
                     scores = {}
                     for (g, seat), r in zip(meta, res):

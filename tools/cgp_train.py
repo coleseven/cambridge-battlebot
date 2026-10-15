@@ -119,7 +119,7 @@ def n_links(g):
 
 
 # ---------------------------------------------------------------- evaluation
-def evaluate(progs, p, opps, layout, cand_slots, elite_bot, a):
+def evaluate(progs, p, opps, layout, cand_slots, elite_bot, a, anchor=None):
     """Mean duel score of each program (as hero p) against the elite bot over opps x both seats."""
     fits = [0.0] * len(progs)
     for k in range(0, len(progs), len(cand_slots)):
@@ -127,9 +127,10 @@ def evaluate(progs, p, opps, layout, cand_slots, elite_bot, a):
         games, meta = [], []
         for i, slot in zip(idx, cand_slots):
             bot = nt.patch(slot, nt.blob({r: progs[i] for r in ROWS[p]}, a.resign), f"c{i}")
-            for q in opps:
-                games.append((bot, elite_bot, nt.map_path(layout, p, q))); meta.append((i, 0))
-                games.append((elite_bot, bot, nt.map_path(layout, q, p))); meta.append((i, 1))
+            for j, q in enumerate(opps):       # first half vs evolving elites, second half vs the fixed anchor
+                opp = elite_bot if anchor is None or j < (len(opps) + 1) // 2 else anchor
+                games.append((bot, opp, nt.map_path(layout, p, q))); meta.append((i, 0))
+                games.append((opp, bot, nt.map_path(layout, q, p))); meta.append((i, 1))
         res = arena.play_many(games, a.jobs)
         acc = {}
         for (i, seat), r in zip(meta, res):
@@ -156,18 +157,18 @@ def run(a):
         print(f"resuming at generation {st['gen']}", flush=True)
     else:
         rng = random.Random(11)
-        seed = duel_train.current_mean(pickle.loads((duel_train.OUT / a.seed_from / "state.pkl").read_bytes()))
+        seeds = nt.seed_rows(a.seed_from)
         st = {"gen": 0, "islands": {}, "elite": {}, "seed_from": a.seed_from, "rng": rng.getstate()}
         for p, rows in ROWS.items():
-            w = np.mean([seed[r] for r in rows], axis=0)
-            base = seeded_genome(w, rng)
+            base = seeded_genome(seeds[p], rng)
             st["islands"][p] = [{"g": base if i == 0 else mutate(base, rng), "fit": None} for i in range(a.islands)]
             st["elite"][p] = base
         print(f"seeded {len(ROWS)} heroes x {a.islands} islands from {a.seed_from}", flush=True)
     rng = random.Random()
     rng.setstate(st["rng"])
-    slots = nt.build_slots(a.slots + 1, "cgpslots")
-    elite_slot, cand_slots = slots[0], slots[1:]
+    slots = nt.build_slots(a.slots + 2, "cgpslots")
+    elite_slot, anchor = slots[0], nt.anchor_bot(slots[1], a.resign)
+    cand_slots = slots[2:]
     log = d / "log.jsonl"
     for _ in range(a.gens):
         t0 = time.perf_counter()
@@ -183,7 +184,7 @@ def run(a):
             for i, isl in enumerate(islands):
                 cands.append((i, isl["g"]))
                 cands += [(i, mutate(isl["g"], rng)) for _ in range(a.lam)]
-            fits = evaluate([program(g) for _, g in cands], p, opps, layout, cand_slots, elite_bot, a)
+            fits = evaluate([program(g) for _, g in cands], p, opps, layout, cand_slots, elite_bot, a, anchor)
             fits = [f - 0.002 * n_links(g) for f, (_, g) in zip(fits, cands)]
             for i, isl in enumerate(islands):
                 group = [(f, k) for k, (f, (ii, _)) in enumerate(zip(fits, cands)) if ii == i]

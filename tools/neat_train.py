@@ -1,0 +1,374 @@
+"""NEAT training of per-character fighting networks (bots/neat) in 1v1 objective duels.
+
+Each draft pick has its own NEAT population (C&I: one network drives both bodies). A generation
+evaluates every population against the current elite network of each sampled opponent pick, both
+seats, on the gem-cluster duel arenas. Genomes are not compiled: a fixed set of pre-built "slot"
+bots has its genome block patched in place (see bots/neat/src/genome.h), so a new genome costs a
+file write. Populations are seeded from a CMA duel run's linear weights (curriculum warm start):
+generation 0 plays exactly like that run, and NEAT adds structure from there.
+
+  .venv/Scripts/python -u tools/neat_train.py run n1 --seed-from d2 [--gens 1000] [--pop 30]
+      [--opps 4] [--slots 8] [--jobs 4] [--resign 800]
+  .venv/Scripts/python tools/neat_train.py export n1        # elite networks -> .arena/neat/n1/elites.json
+
+Structure control (Green, "Phased Searching with NEAT"): each population alternates between a
+complexifying phase (add/delete mutations) and a simplifying phase (deletions only). It switches to
+simplifying when mean complexity (nodes + enabled links) rises PHASE_RISE above the floor set at the
+last switch, and back once simplification has not lowered mean complexity for PHASE_STALL generations.
+Activation functions mutate per node. A small per-link fitness cost breaks ties toward smaller nets.
+Networks over MAX_NODES/MAX_LINKS are rejected (bot-side fuel cap: top-12 options, <=35k fuel).
+
+Resumable: state is pickled every generation to .arena/neat/<run>/state.pkl.
+"""
+import argparse
+import json
+import pickle
+import random
+import struct
+import sys
+import time
+import warnings
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import arena  # noqa: E402
+import duel_train  # noqa: E402
+
+import neat  # noqa: E402
+
+PICKS = duel_train.PICKS
+ROWS = duel_train.ROWS          # pick -> champion_type rows (C&I -> [3, 4])
+NF = 25
+MAX_NODES, MAX_LINKS, WORDS = 64, 160, 16384
+MAGIC = struct.pack("<II", 0x4E454154, 0x424C4F42)
+ACT = {"identity": 0, "tanh": 1, "sigmoid": 2, "relu": 3}
+OUT = arena.ARENA / "neat"
+SRC = arena.ROOT / "bots" / "neat"
+
+CONFIG = f"""
+[NEAT]
+fitness_criterion     = max
+fitness_threshold     = 1000000
+pop_size              = {{pop}}
+reset_on_extinction   = True
+no_fitness_termination = True
+
+[DefaultGenome]
+num_inputs              = {NF}
+num_hidden              = 0
+num_outputs             = 1
+initial_connection      = full_direct
+feed_forward            = True
+compatibility_disjoint_coefficient = 1.0
+compatibility_weight_coefficient   = 0.5
+conn_add_prob           = 0.3
+conn_delete_prob        = 0.15
+node_add_prob           = 0.1
+node_delete_prob        = 0.05
+activation_default      = identity
+activation_options      = identity tanh relu sigmoid
+activation_mutate_rate  = 0.05
+aggregation_default     = sum
+aggregation_options     = sum
+aggregation_mutate_rate = 0.0
+bias_init_mean          = 0.0
+bias_init_stdev         = 0.5
+bias_init_type          = gaussian
+bias_max_value          = 30.0
+bias_min_value          = -30.0
+bias_mutate_power       = 0.3
+bias_mutate_rate        = 0.5
+bias_replace_rate       = 0.05
+response_init_mean      = 1.0
+response_init_stdev     = 0.0
+response_init_type      = gaussian
+response_max_value      = 30.0
+response_min_value      = -30.0
+response_mutate_power   = 0.0
+response_mutate_rate    = 0.0
+response_replace_rate   = 0.0
+weight_init_mean        = 0.0
+weight_init_stdev       = 1.0
+weight_init_type        = gaussian
+weight_max_value        = 30.0
+weight_min_value        = -30.0
+weight_mutate_power     = 0.3
+weight_mutate_rate      = 0.8
+weight_replace_rate     = 0.05
+enabled_default         = True
+enabled_mutate_rate     = 0.01
+enabled_rate_to_true_add  = 0.0
+enabled_rate_to_false_add = 0.0
+single_structural_mutation = False
+structural_mutation_surer  = default
+node_gene_type          = DefaultNodeGene
+connection_gene_type    = DefaultConnectionGene
+
+[DefaultSpeciesSet]
+compatibility_threshold = 3.0
+
+[DefaultStagnation]
+species_fitness_func = max
+max_stagnation       = 20
+species_elitism      = 2
+
+[DefaultReproduction]
+elitism            = 2
+survival_threshold = 0.2
+min_species_size   = 2
+"""
+
+
+PHASE_RISE, PHASE_STALL = 20.0, 5
+COMPLEXIFY = {"conn_add_prob": 0.3, "node_add_prob": 0.1, "conn_delete_prob": 0.15, "node_delete_prob": 0.05}
+SIMPLIFY = {"conn_add_prob": 0.0, "node_add_prob": 0.0, "conn_delete_prob": 0.5, "node_delete_prob": 0.3}
+
+
+def complexity(pop):
+    gs = list(pop.population.values())
+    return sum(len(g.nodes) + sum(1 for c in g.connections.values() if c.enabled) for g in gs) / max(1, len(gs))
+
+
+def set_phase(pop, mode):
+    for k, v in (COMPLEXIFY if mode == "complexify" else SIMPLIFY).items():
+        setattr(pop.config.genome_config, k, v)
+
+
+def update_phase(ph, pop):
+    """Phased searching: returns the (possibly switched) phase record after a generation."""
+    mc = complexity(pop)
+    if ph["mode"] == "complexify":
+        if mc > ph["floor"] + PHASE_RISE:
+            ph.update(mode="simplify", best=mc, stall=0)
+    else:
+        if mc < ph["best"] - 0.5:
+            ph.update(best=mc, stall=0)
+        else:
+            ph["stall"] += 1
+            if ph["stall"] >= PHASE_STALL:
+                ph.update(mode="complexify", floor=mc)
+    set_phase(pop, ph["mode"])
+    ph["mean_complexity"] = round(mc, 1)
+    return ph
+
+
+def make_config(run_dir: Path, pop: int, tag: str = ""):
+    path = run_dir / f"neat{tag}.cfg"
+    path.write_text(CONFIG.replace("{pop}", str(pop)))
+    return neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet,
+                       neat.DefaultStagnation, str(path))
+
+
+# ---------------------------------------------------------------- genome -> program words
+def program(genome, config):
+    """Feed-forward program words for the bot, or None if over the size caps."""
+    net = neat.nn.FeedForwardNetwork.create(genome, config)
+    slots = {k: -k - 1 for k in config.genome_config.input_keys}
+    for node, *_ in net.node_evals:
+        if node not in slots:
+            slots[node] = NF + len([s for s in slots.values() if s >= NF])
+    if len(net.node_evals) > MAX_NODES or max(slots.values()) >= NF + MAX_NODES:
+        return None
+    if sum(len(ev[5]) for ev in net.node_evals) > MAX_LINKS:
+        return None
+    out_key = config.genome_config.output_keys[0]
+    if out_key not in slots:          # output unreachable: constant score
+        slots[out_key] = NF
+    words = [len(net.node_evals)]
+    for node, act, _agg, bias, resp, links in net.node_evals:
+        name = genome.nodes[node].activation
+        words += [slots[node], ACT.get(name, 0), _f(bias), _f(resp), len(links)]
+        for src, w in links:
+            words += [slots[src], _f(w)]
+    words.append(slots[out_key])
+    return words
+
+
+def _f(x):
+    return struct.unpack("<I", struct.pack("<f", float(x)))[0]
+
+
+def blob(programs: dict, resign: int):
+    """programs: champion_type -> program words."""
+    words = [0x4E454154, 0x424C4F42, WORDS, 1, resign] + [0] * 12
+    for t, prog in programs.items():
+        words[5 + t] = len(words)
+        words += prog
+    if len(words) > WORDS:
+        raise ValueError("genome block overflow")
+    return struct.pack(f"<{len(words)}I", *words)
+
+
+# ---------------------------------------------------------------- slot bots
+def build_slots(n):
+    slots = []
+    for i in range(n):
+        d = arena.ARENA / "neatslots" / f"s{i:02d}"
+        if not (d / "src").exists():
+            import shutil
+            shutil.copytree(SRC / "src", d / "src")
+        slots.append(arena.build(d, f"s{i:02d}").path)
+    return slots
+
+
+def patch(slot_dir: Path, data: bytes, name: str):
+    for n in ("bot.wasm", "bot-injected.wasm"):
+        p = slot_dir / ".cambc" / "build" / n
+        b = bytearray(p.read_bytes())
+        i = b.find(MAGIC)
+        if i < 0:
+            raise RuntimeError(f"no genome block in {p}")
+        b[i:i + len(data)] = data
+        b[i + len(data):i + WORDS * 4] = bytes(WORDS * 4 - len(data))
+        p.write_bytes(bytes(b))
+    return arena.Bot(name, slot_dir, arena.sha(slot_dir / ".cambc" / "build" / "bot-injected.wasm"))
+
+
+def pack_pop(pop):
+    """Picklable snapshot (neat Population itself holds an itertools.count)."""
+    return {"generation": pop.generation, "config": pop.config, "population": pop.population,
+            "species": pop.species, "tracker": getattr(pop.reproduction, "innovation_tracker", None)}
+
+
+def unpack_pop(snap):
+    import itertools
+    pop = neat.Population(snap["config"], (snap["population"], snap["species"], snap["generation"]))
+    if snap["tracker"] is not None:
+        pop.reproduction.innovation_tracker = snap["tracker"]
+        snap["config"].genome_config.innovation_tracker = snap["tracker"]
+    pop.reproduction.genome_indexer = itertools.count(max(snap["population"]) + 1)
+    return pop
+
+
+def save_state(path, st):
+    snap = dict(st, pops={p: pack_pop(pop) for p, pop in st["pops"].items()}, random=random.getstate())
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(pickle.dumps(snap))
+    tmp.replace(path)    # atomic: a crash mid-write never corrupts the last good checkpoint
+
+
+def load_state(path):
+    st = pickle.loads(path.read_bytes())
+    random.setstate(st.pop("random"))
+    st["pops"] = {p: unpack_pop(snap) for p, snap in st["pops"].items()}
+    for p, pop in st["pops"].items():
+        set_phase(pop, st["phase"][p]["mode"])
+    return st
+
+
+def map_path(layout, a, b):
+    return arena.ROOT / "maps_duel" / "1v1" / f"{layout}__{PICKS[a]}-{PICKS[b]}.map26a"
+
+
+# ---------------------------------------------------------------- training
+def seed_population(pop, config, row_weights, rng):
+    for g in pop.population.values():
+        for (i, o), cg in g.connections.items():
+            if o == config.genome_config.output_keys[0] and i < 0:
+                cg.weight = float(row_weights[-i - 1]) + rng.gauss(0, 0.05)
+        out = g.nodes[config.genome_config.output_keys[0]]
+        out.bias, out.response, out.activation = 0.0, 1.0, "identity"
+
+
+def run(a):
+    d = OUT / a.name
+    d.mkdir(parents=True, exist_ok=True)
+    config = make_config(d, a.pop)
+    ck = d / "state.pkl"
+    rng = random.Random(1)
+    if ck.exists():
+        st = load_state(ck)
+        print(f"resuming at generation {st['gen']}", flush=True)
+    else:
+        import numpy as np
+        seed = duel_train.current_mean(pickle.loads((duel_train.OUT / a.seed_from / "state.pkl").read_bytes()))
+        st = {"gen": 0, "pops": {}, "elites": {}, "phase": {}, "seed_from": a.seed_from}
+        for p, rows in ROWS.items():
+            pop = neat.Population(make_config(d, a.pop, f"_{PICKS[p]}"))   # own config: own phase
+            w = np.mean([seed[r] for r in rows], axis=0)
+            seed_population(pop, config, w, rng)
+            st["pops"][p] = pop
+            st["phase"][p] = {"mode": "complexify", "floor": complexity(pop), "best": 0.0, "stall": 0}
+            st["elites"][p] = next(iter(pop.population.values()))   # seed genome = linear policy
+        print(f"seeded {len(ROWS)} populations from {a.seed_from}", flush=True)
+    slots = build_slots(a.slots + 1)
+    elite_slot, cand_slots = slots[0], slots[1:]
+    log = d / "log.jsonl"
+
+    for _ in range(a.gens):
+        t0 = time.perf_counter()
+        gen = st["gen"] + 1
+        grng = random.Random(gen)
+        layout = grng.choice(["open", "pillars"])
+        summary = {}
+        for p, pop in st["pops"].items():
+            elite_progs = {}
+            for q, eg in st["elites"].items():
+                prog = program(eg, config)
+                if prog:
+                    for r in ROWS[q]:
+                        elite_progs[r] = prog
+            elite_bot = patch(elite_slot, blob(elite_progs, a.resign), "elite")
+            opps = grng.sample(range(len(PICKS)), a.opps)
+
+            def evaluate(genomes, _config, p=p, opps=opps, elite_bot=elite_bot):
+                items = list(genomes)
+                for k in range(0, len(items), len(cand_slots)):
+                    batch = items[k:k + len(cand_slots)]
+                    games, meta = [], []
+                    for (gid, g), slot in zip(batch, cand_slots):
+                        prog = program(g, config)
+                        if prog is None:
+                            g.fitness = -50.0
+                            continue
+                        bot = patch(slot, blob({r: prog for r in ROWS[p]}, a.resign), f"g{gid}")
+                        for q in opps:
+                            games.append((bot, elite_bot, map_path(layout, p, q))); meta.append((g, 0))
+                            games.append((elite_bot, bot, map_path(layout, q, p))); meta.append((g, 1))
+                    res = arena.play_many(games, a.jobs)
+                    scores = {}
+                    for (g, seat), r in zip(meta, res):
+                        if "error" not in r and a.resign and r["round"] > a.resign + 2:
+                            r = {"error": "slot rebuilt (genome lost)"}
+                        scores.setdefault(id(g), [g, []])[1].append(duel_train.side_score(r, seat))
+                    for g, sc in scores.values():
+                        g.fitness = sum(sc) / len(sc) - 0.002 * len(g.connections)
+                best = max((g for _, g in items), key=lambda g: g.fitness)
+                st["elites"][p] = best
+                summary[PICKS[p]] = (round(best.fitness, 2), len(best.nodes), len(best.connections))
+
+            pop.run(evaluate, 1)
+            ph = update_phase(st["phase"][p], pop)
+            summary[PICKS[p]] += (ph["mode"][0], ph["mean_complexity"])
+        st["gen"] = gen
+        save_state(ck, st)
+        with log.open("a") as fh:
+            fh.write(json.dumps({"gen": gen, "layout": layout, "best": summary}) + "\n")
+        print(f"gen {gen:4} {layout:7} {time.perf_counter() - t0:6.0f}s  " +
+              " ".join(f"{k}:{v[0]:+.1f}/{v[1]}n{v[2]}c/{v[3]}{v[4]}" for k, v in summary.items()), flush=True)
+
+
+def export(a):
+    d = OUT / a.name
+    st = load_state(d / "state.pkl")
+    config = make_config(d, 2)
+    out = {PICKS[p]: program(g, config) for p, g in st["elites"].items()}
+    (d / "elites.json").write_text(json.dumps({"gen": st["gen"], "programs": out}))
+    print(f"gen {st['gen']}: wrote {d / 'elites.json'}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run"); r.add_argument("name"); r.add_argument("--seed-from", default="d2")
+    r.add_argument("--gens", type=int, default=1000); r.add_argument("--pop", type=int, default=30)
+    r.add_argument("--opps", type=int, default=4); r.add_argument("--slots", type=int, default=8)
+    r.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS); r.add_argument("--resign", type=int, default=800)
+    e = sub.add_parser("export"); e.add_argument("name")
+    a = ap.parse_args()
+    {"run": run, "export": export}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

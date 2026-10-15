@@ -13,6 +13,8 @@ Site: https://2026a.battlecode.co.uk/game/home · Rules summary: `docs/GAME_NOTE
 - `tools/scout.py` — public ladder/match statistics scraper (`scouting/`).
 - `tools/mapformat.py`, `mapstats.py`, `mapgen.py`, `validate_maps.py` — `.map26a` codec, map features, generator,
   validator (format: `docs/MAP_FORMAT.md`). `maps_gen/` — 40 generated held-out maps (use with the tuner's `--maps`).
+  They skew from the pool (median 15 vs 2 bush clusters, 12 vs 5 altars, up to 54 wolves, more holes), so use them
+  to check that tuned values generalise, not as the main tuning set.
 - `bots/sparring-*` — git-ignored external opponents (e.g. `sparring-tarot` = Tarot Club's public foundry snapshot).
 
 ## Commands (run from repo root; the CLI lives in `.venv`)

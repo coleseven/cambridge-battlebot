@@ -1,0 +1,17 @@
+{
+  "SQUAD_DPS_SHARE": [0.3, 1.2],
+  "GOLD_WEIGHT": [0.0, 1.0],
+  "CLAIM_PENALTY": [0.0, 60.0],
+  "SAFE_DAMAGE_FRAC": [0.4, 2.5],
+  "ENEMY_SIDE_WEIGHT": [0.0, 0.6],
+  "SWITCH_MARGIN": [1.0, 2.5],
+  "RECALL_HP_FRAC": [0.1, 0.5],
+  "WALK_HOME_DIST": [0, 20, "int"],
+  "BANK_MIN_GEMS": [10, 120, "int"],
+  "BANK_NEAR_MIN": [1, 60, "int"],
+  "BANK_NEAR_DIST": [1, 15, "int"],
+  "SHOP_RECALL_GOLD": [30, 400, "int"],
+  "FIGHT_MIN_HP": [0.1, 0.8],
+  "FIGHT_SLACK": [-1, 2, "int"],
+  "FLEE_GEMS": [0, 150, "int"]
+}

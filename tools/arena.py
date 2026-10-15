@@ -135,9 +135,13 @@ def _load_cache():
         _cache = {}
         if CACHE.exists():
             for line in CACHE.read_text(encoding="utf-8").splitlines():
-                if line.strip():
+                if not line.strip():
+                    continue
+                try:
                     r = json.loads(line)
-                    _cache[r["key"]] = r
+                except json.JSONDecodeError:  # a line torn by a crash mid-write; that game just replays
+                    continue
+                _cache[r["key"]] = r
     return _cache
 
 

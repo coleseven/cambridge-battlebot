@@ -10,3 +10,4 @@ __pycache__/
 scouting/
 .arena/
 bots/sparring-*/
+bots/dev/

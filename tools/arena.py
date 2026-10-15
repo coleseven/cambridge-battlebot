@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -25,7 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CAMBC = ROOT / ".venv" / ("Scripts/cambc.exe" if os.name == "nt" else "bin/cambc")
 ARENA = ROOT / ".arena"
-CACHE = ARENA / "results.jsonl"
+# Each machine appends to its own cache file; every results*.jsonl in .arena is read, so caches
+# synced from another PC are shared without two writers touching one file.
+CACHE = ARENA / f"results-{socket.gethostname().lower()}.jsonl"
 DEFAULT_JOBS = max(1, min(12, (os.cpu_count() or 2) * 3 // 4))
 
 _cache_lock = threading.Lock()
@@ -133,8 +136,8 @@ def _load_cache():
     global _cache
     if _cache is None:
         _cache = {}
-        if CACHE.exists():
-            for line in CACHE.read_text(encoding="utf-8").splitlines():
+        for path in sorted(ARENA.glob("results*.jsonl")):
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:

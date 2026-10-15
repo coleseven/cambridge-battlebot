@@ -42,7 +42,15 @@ constexpr int SHOP_RECALL_GOLD = 150;
 constexpr int FIRST_EMBLEM = 1;
 
 // --- Fighting champions ---
-// Fight a visible enemy when my health fraction exceeds theirs by this margin (or they are killable).
-constexpr float FIGHT_HP_EDGE = 0.15f;
+// Engage visible enemies when my health fraction is at least this and we are not outnumbered nearby.
+constexpr float FIGHT_MIN_HP = 0.4f;
+// Allowed excess of enemies over allies within 4 tiles before we count as outnumbered.
+constexpr int FIGHT_SLACK = 0;
 // Flee from enemies when carrying at least this many gems and not clearly winning.
 constexpr int FLEE_GEMS = 20;
+
+// --- Pathing / coordination switches ---
+// 1 = route around every camp tile (except the target's); 0 = terrain only.
+constexpr int CAMP_WALLS = 0;
+// 1 = keep my squad claim while recalling, shopping or dead; 0 = clear it.
+constexpr int KEEP_CLAIM = 0;

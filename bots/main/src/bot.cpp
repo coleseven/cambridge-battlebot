@@ -67,7 +67,7 @@ struct World {
     bool ready = false;
     int w = 0, h = 0;
     c::bitboard terrain;           // static impassable for walking
-    c::bitboard own_spawn, enemy_spawn, altars_bb;
+    c::bitboard own_spawn, enemy_spawn, altars_bb, camp_tiles;
     std::vector<vec2> altars;
     std::vector<Group> groups;
     std::unique_ptr<c::distance_field> altar_field, home_field, enemy_field;
@@ -77,6 +77,10 @@ struct World {
     bool ranged = false;
     // Per-body runtime state.
     int target = -1;
+    vec2 seen_enemy{-100, -100};
+    int seen_round = -1000;
+    vec2 last_pos{-1, -1};
+    int stuck = 0;  // consecutive turns a step_along made no progress
     int shards_bought = 0, emblem_shards = 0;
 };
 World W;
@@ -86,11 +90,26 @@ std::vector<c::map::camp_group> HANDLES;
 std::unique_ptr<c::distance_field> make_field(const c::bitboard& roots) {
     auto f = std::make_unique<c::distance_field>();
     c::bitboard visited;
-    f->compute(W.terrain & ~roots, roots, visited);
+    // Camp tiles are almost always occupied, so route around every group except the target's own.
+    f->compute((CAMP_WALLS ? (W.terrain | W.camp_tiles) : W.terrain) & ~roots, roots, visited);
     return f;
 }
 
-int fget(const c::distance_field* f, vec2 p) { return f ? f->get(p) : UNREACH; }
+bool in_bounds(vec2 p);
+// Field distance at p; on a tile the field treats as a wall (e.g. standing on a camp tile), use the
+// best neighbour + 1.
+int fget(const c::distance_field* f, vec2 p) {
+    if (!f) return UNREACH;
+    const int v = f->get(p);
+    if (v != UNREACH) return v;
+    int best = UNREACH;
+    for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy) {
+            vec2 q{p.x + dx, p.y + dy};
+            if ((dx || dy) && in_bounds(q)) best = std::min(best, static_cast<int>(f->get(q)));
+        }
+    return best == UNREACH ? UNREACH : best + 1;
+}
 
 int chebyshev(vec2 a, vec2 b) { return static_cast<int>(a.chebyshev_distance(b)); }
 
@@ -136,11 +155,14 @@ void init_world() {
     }
     W.body = std::min(W.body, 5);
 
+
+    HANDLES = c::map::camp_groups();
+    W.camp_tiles.clear();
+    for (const auto& g : HANDLES)
+        for (const auto& m : g.camps()) W.camp_tiles.set(m.spawn_position(), true);
     W.home_field = make_field(W.own_spawn);
     W.enemy_field = make_field(W.enemy_spawn);
     W.altar_field = make_field(W.altars_bb);
-
-    HANDLES = c::map::camp_groups();
     for (const auto& g : HANDLES) {
         Group G;
         G.gems = static_cast<int>(g.gem_value());
@@ -198,6 +220,7 @@ std::array<std::uint8_t, 8> read_shared() {
     return b;
 }
 void write_claim(int group) {
+    if (group == -2) group = KEEP_CLAIM ? W.target : -1;
     std::uint8_t v = group < 0 ? 0 : static_cast<std::uint8_t>(std::min(group + 1, 255));
     c::shared_memory.write(static_cast<std::size_t>(W.body), std::span{&v, 1});
 }
@@ -220,7 +243,7 @@ bool try_dash(const c::distance_field& f, vec2 me, const c::bitboard& blocked) {
     for (const auto& ab : self.abilities()) {
         if (!ab.info() || !ab.is_dash()) continue;
         if (!ab.is_ready() || !self.can_cast()) return false;
-        const int here = f.get(me);
+        const int here = fget(&f, me);
         vec2 best = me;
         int best_d = here;
         for (int dx = -2; dx <= 2; ++dx)
@@ -242,12 +265,12 @@ bool step_along(const c::distance_field& f, bool allow_dash = true) {
     auto& self = c::self();
     if (!self.can_move()) return false;
     const vec2 me = self.position();
-    const int here = f.get(me);
+    const int here = fget(&f, me);
     if (here == 0 || here == UNREACH) return false;
     auto blocked = dynamic_blocked(me);
     if (allow_dash && here >= 4) try_dash(f, me, blocked);
     const vec2 cur = self.position();
-    const int cur_d = f.get(cur);
+    const int cur_d = fget(&f, cur);
     std::array<std::pair<int, vec2>, 8> cand{};
     int n = 0;
     for (auto d : DIRS) {
@@ -261,10 +284,20 @@ bool step_along(const c::distance_field& f, bool allow_dash = true) {
     for (int i = 0; i < n; ++i) {
         if (cand[i].first == cur_d && i > 0) break;  // only one sideways attempt
         try {
-            if (self.move_absolute(cand[i].second)) return true;
+            if (self.move_absolute(cand[i].second)) { W.stuck = 0; return true; }
         } catch (const std::exception&) {}
     }
-    return cur != me;
+    if (cur != me) { W.stuck = 0; return true; }
+    // Jammed (usually by allies): after two blocked turns take any free tile, rotating by body index.
+    if (++W.stuck >= 2) {
+        for (int k = 0; k < 8; ++k) {
+            const auto d = DIRS[(k + W.body * 3 + W.stuck) % 8];
+            vec2 p{cur.x + d.x, cur.y + d.y};
+            if (!in_bounds(p) || blocked.is_set(p) || f.get(p) == UNREACH) continue;
+            try { if (self.move_absolute(p)) { W.stuck = 0; return true; } } catch (const std::exception&) {}
+        }
+    }
+    return false;
 }
 
 // Step to increase distance from a point (flee), preferring tiles closer to home.
@@ -468,7 +501,7 @@ void play_turn_inner() {
 
     if (!me.is_alive()) {
         shop();
-        write_claim(-1);
+        write_claim(-2);
         why("dead");
         build_fields(15000);
         return;
@@ -526,37 +559,67 @@ void play_turn_inner() {
     }
 
     g_stage = "fight";
-    // Fight a visible enemy in range when favourable.
-    if (nearest_enemy && me.can_attack()) {
+    // Fight when not outnumbered nearby (or the target is killable); flee only when losing.
+    if (!enemies.empty()) {
+        c::bitboard ball;
+        ball.clear();
+        ball.draw_chebyshev(pos, 4);
+        const int allies_near = static_cast<int>((c::vision::champion_tiles(team::ally) & ball).count());  // includes me
+        const int enemies_near = static_cast<int>((c::vision::champion_tiles(team::enemy) & ball).count());
+        const c::champion* tgt = nullptr;
+        float tgt_hp = 1e9f;
+        int tgt_d = 99;
+        for (const auto& e : enemies) {
+            try {
+                if (!e.is_visible() || !e.is_alive()) continue;
+                const int d = chebyshev(pos, e.position());
+                const float eh = e.health();
+                if (d <= 4 && eh < tgt_hp) { tgt = &e; tgt_hp = eh; tgt_d = d; }
+            } catch (const std::exception&) {}
+        }
+        if (tgt) W.seen_enemy = tgt->position(), W.seen_round = round;
         const float my_frac = hp / maxhp;
-        const auto& e = *nearest_enemy;
-        float e_hp = 0, e_max = 1;
-        try { e_hp = e.health(); e_max = std::max(1.0f, e.max_health()); } catch (const std::exception&) {}
-        const float e_frac = e_hp / e_max;
         const float burst = me.strength() * 2 + (is_caster(W.type) ? me.focus() * 2 : 0);
-        const bool killable = e_hp > 0 && e_hp <= burst;
-        const bool edge = my_frac - e_frac >= FIGHT_HP_EDGE;
-        const bool cautious = gems >= FLEE_GEMS && !killable;
-        if ((killable || edge) && !cautious) {
-            if (chebyshev(pos, e.position()) <= me.attack_range()) {
-                // Damage spell first (ranged kits cannot then move, which is fine here).
+        const bool killable = tgt && tgt_hp <= burst;
+        const bool outnumbered = enemies_near > allies_near + FIGHT_SLACK;
+        const bool engage = tgt && (killable || (!outnumbered && my_frac >= FIGHT_MIN_HP));
+        if (engage) {
+            why("fight");
+            const auto& e = *tgt;
+            // Melee closes small gaps before swinging.
+            if (!W.ranged && tgt_d > 1 && tgt_d <= 2 && me.can_move()) {
+                auto blocked = dynamic_blocked(pos);
+                for (auto d : DIRS) {
+                    vec2 p{pos.x + d.x, pos.y + d.y};
+                    if (!in_bounds(p) || blocked.is_set(p) || chebyshev(p, e.position()) > 1) continue;
+                    try { if (me.move_absolute(p)) break; } catch (const std::exception&) {}
+                }
+            }
+            const vec2 now = me.position();
+            const bool walked = now != pos;
+            if (!walked && me.can_cast()) {
                 for (const auto& ab : me.abilities()) {
                     if (!ab.info() || !(ab.is_damage() || ab.is_cc() || ab.is_aoe_damage())) continue;
-                    if (!ab.can_target_enemies() || !ab.is_ready() || !me.can_cast()) continue;
-                    if (chebyshev(pos, e.position()) > 4) continue;
-                    try { if (ab.is_aoe_damage() ? ab.use(e.position()) : ab.use(e)) break; } catch (const std::exception&) {}
+                    if (!ab.can_target_enemies() || !ab.is_ready()) continue;
+                    try {
+                        if (chebyshev(now, e.position()) > 4) break;
+                        if (ab.is_aoe_damage() ? ab.use(e.position()) : ab.use(e)) break;
+                    } catch (const std::exception&) {}
                 }
-                why("fight");
-                try { me.attack(e); } catch (const std::exception&) {}
-                try {
+            }
+            try {
+                if (e.is_visible() && chebyshev(now, e.position()) <= me.attack_range() && me.can_attack()) {
+                    me.attack(e);
                     if (e.is_visible() && e.health() > 0 && use_slot_kind(true, false) && me.can_attack()) me.attack(e);
-                } catch (const std::exception&) {}
+                }
+            } catch (const std::exception&) {}
+            if (me.can_attack() || me.position() != pos || !W.ranged) {
+                // Did something (or melee will keep farming): fall through only if nothing happened.
                 write_claim(W.target);
                 build_fields(15000);
                 return;
             }
-        } else if ((gems >= FLEE_GEMS || my_frac < 0.5f) && nearest_d <= 4) {
-            // Not winning and exposed: break away (bank if an altar is right here).
+        } else if (tgt && (outnumbered || my_frac < FIGHT_MIN_HP) && (gems >= FLEE_GEMS || my_frac < 0.5f)) {
             if (gems > 0 && fget(W.altar_field.get(), pos) <= 1) {
                 for (auto a : W.altars)
                     if (chebyshev(pos, a) <= c::constants::submit_gems_range) {
@@ -564,7 +627,7 @@ void play_turn_inner() {
                     }
             }
             why("flee");
-            step_away(e.position());
+            step_away(tgt->position());
             write_claim(W.target);
             build_fields(15000);
             return;
@@ -589,7 +652,7 @@ void play_turn_inner() {
         for (auto p : camp_near.positions())
             if (chebyshev(pos, p) <= 3) { hot = true; threat = p; break; }
         why("lowhp");
-        write_claim(-1);
+        write_claim(-2);
         if (home_d <= WALK_HOME_DIST || hot) {
             if (hot && threat != pos) step_away(threat);
             else step_along(*W.home_field);
@@ -611,7 +674,7 @@ void play_turn_inner() {
         if (altar_d <= c::constants::submit_gems_range) {
             for (auto a : W.altars)
                 if (chebyshev(pos, a) <= c::constants::submit_gems_range) {
-                    try { me.submit_gems(a); write_claim(W.target); return; } catch (const std::exception&) {}
+                    try { me.submit_gems(a); write_claim(W.target); return; } catch (const std::exception& ex) { if (BOT_DEBUG) std::cout << "ERR submit " << ex.what() << std::endl; }
                 }
         }
         // Don't abandon a capture that is about to land unless winning now.
@@ -629,7 +692,7 @@ void play_turn_inner() {
     // ---- shopping trip ----
     if (!at_spawn && gems == 0 && me.gold_count() >= SHOP_RECALL_GOLD && nearest_d > 6) {
         const int home_d = fget(W.home_field.get(), pos);
-        write_claim(-1);
+        write_claim(-2);
         why("shoptrip");
         if (home_d <= WALK_HOME_DIST) step_along(*W.home_field);
         else { try { me.recall(); } catch (const std::exception&) {} }
@@ -637,7 +700,7 @@ void play_turn_inner() {
         return;
     }
     // Stay on spawn until healed (spawn heals fully at turn end).
-    if (at_spawn && hp < maxhp * 0.95f) { write_claim(-1); build_fields(15000); return; }
+    if (at_spawn && hp < maxhp * 0.95f) { write_claim(-2); build_fields(15000); return; }
 
     g_stage = "farm";
     // ---- farming ----

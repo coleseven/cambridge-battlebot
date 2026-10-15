@@ -162,10 +162,11 @@ def all_maps(pool="maps"):
 
 def _summarise(stats: dict) -> dict:
     t = stats["teams"]
-    per = [{"kills": 0, "deaths": 0, "gold": 0} for _ in range(2)]
+    per = [{"kills": 0, "deaths": 0, "gold": 0, "dmg": 0.0, "taken": 0.0} for _ in range(2)]
     for c in stats["champions"]:
         p = per[c["team"]]
         p["kills"] += c["kills"]; p["deaths"] += c["deaths"]; p["gold"] += c["earnedGold"]
+        p["dmg"] += c["championDamageDone"]; p["taken"] += c["championDamageTaken"]
     return {"outcome": stats["outcome"], "round": stats["round"],
             "gems": [t[0]["submittedGems"], t[1]["submittedGems"]], "faults": stats["botFaults"],
             "drafts": [t[0]["draftPicks"], t[1]["draftPicks"]], "teams": per}

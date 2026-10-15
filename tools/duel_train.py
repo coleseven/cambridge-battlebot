@@ -29,7 +29,8 @@ import arena  # noqa: E402
 
 PICKS = ["ryth", "vesper", "vendetta", "ci", "stellar", "prism", "marcella", "willow", "ren", "varg", "tavi"]
 ROWS = {0: [0], 1: [1], 2: [2], 3: [3, 4], 4: [5], 5: [6], 6: [7], 7: [8], 8: [9], 9: [10], 10: [11]}
-NF = 20
+NF = int((Path(__file__).resolve().parent.parent / "bots" / "duel" / "src" / "weights.h").read_text()
+         .split("constexpr int NF = ")[1].split(";")[0])
 DUEL_SRC = arena.ROOT / "bots" / "duel" / "src"
 OUT = arena.ARENA / "duel"
 
@@ -82,7 +83,13 @@ def train(a):
         print(f"resuming at gen {st['gen']}")
     else:
         prior = prior_matrix()
-        st = {"gen": 0, "hof": [], "es": {}}
+        if a.init_from:
+            # Curriculum warm start: previous run's learned weights; new feature columns start at 0.
+            old = current_mean(pickle.loads((OUT / a.init_from / "state.pkl").read_bytes()))
+            prior = np.zeros((12, NF))
+            prior[:, :old.shape[1]] = old[:, :NF]
+            print(f"warm start from {a.init_from} ({old.shape[1]} -> {NF} features)")
+        st = {"gen": 0, "hof": [], "es": {}, "init_from": a.init_from}
         for p, rows in ROWS.items():
             x0 = np.concatenate([prior[r] for r in rows])
             st["es"][p] = cma.CMAEvolutionStrategy(x0, a.sigma, {"popsize": a.pop, "verbose": -9, "seed": 7 + p})
@@ -140,10 +147,12 @@ def train(a):
 
 
 def current_mean(st):
-    mean = prior_matrix()
+    """Learned weights of a run as a 12 x nf matrix (nf = that run's feature count)."""
+    nf = len(next(iter(st["es"].values())).mean) // len(ROWS[next(iter(st["es"]))])
+    mean = np.zeros((12, nf))
     for p, es in st["es"].items():
         for k, r in enumerate(ROWS[p]):
-            mean[r] = es.mean[k * NF:(k + 1) * NF]
+            mean[r] = es.mean[k * nf:(k + 1) * nf]
     return mean
 
 
@@ -186,6 +195,7 @@ def main():
     t.add_argument("--size", type=int, default=1); t.add_argument("--opps", type=int, default=5)
     t.add_argument("--pop", type=int, default=8); t.add_argument("--sigma", type=float, default=0.5)
     t.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS)
+    t.add_argument("--init-from", default="", help="warm-start from this run's learned weights (curriculum)")
     m = sub.add_parser("matrix"); m.add_argument("name"); m.add_argument("--size", type=int, default=1)
     m.add_argument("--vs-prior", action="store_true"); m.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS)
     a = ap.parse_args()

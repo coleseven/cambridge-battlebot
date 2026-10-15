@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <variant>
 #include <vector>
 
 #ifndef BOT_DEBUG
@@ -30,7 +31,11 @@ struct State {
     int w = 0, h = 0, type = 0;
     bool ranged = false;
     c::bitboard terrain, own_spawn;
-    std::unique_ptr<c::distance_field> home, enemy_home;
+    std::unique_ptr<c::distance_field> home, enemy_home, objective, altar;
+    c::bitboard camp_tiles;
+    std::vector<c::map::camp_group> groups;
+    std::vector<c::bitboard> group_tiles;
+    std::vector<vec2> altars;
     vec2 last_seen{-1, -1};
     int last_seen_round = -1000;
 };
@@ -56,6 +61,17 @@ void init() {
     S.terrain = c::map::walls() | c::map::holes() | c::map::altars() | enemy_spawn;
     S.home = field_to(S.own_spawn);
     S.enemy_home = field_to(enemy_spawn);
+    S.camp_tiles.clear();
+    S.groups = c::map::camp_groups();
+    for (const auto& g : S.groups) {
+        c::bitboard t;
+        t.clear();
+        for (const auto& m : g.camps()) { S.camp_tiles.set(m.spawn_position(), true); t.set(m.spawn_position(), true); }
+        S.group_tiles.push_back(t);
+    }
+    S.objective = S.camp_tiles.is_empty() ? field_to(enemy_spawn) : field_to(S.camp_tiles);
+    S.altars = c::map::altars().positions();
+    S.altar = field_to(c::map::altars());
     S.type = static_cast<int>(me.champion_name());
     S.ranged = me.attack_range() > 1;
     S.ready = true;
@@ -88,6 +104,8 @@ struct Opt {
     int spell = -1;  // index into spells
     int target = -1; // foe index for spell/attack
     bool atk = false;
+    int camp = -1;   // camp index attacked instead of a foe
+    bool bank = false;
     float score = -1e30f;
 };
 
@@ -136,14 +154,37 @@ void play() {
         } catch (const std::exception&) {}
     }
 
-    if (foes.empty()) {
-        // Fixed rule: heal up at spawn when hurt, otherwise go find the enemy.
+    // Harmless clusters in view (the contested objective).
+    std::vector<c::camp> camps;
+    for (const auto& m : c::vision::camps()) {
+        try { if (m.strength() <= 0 && m.health() > 0) camps.push_back(m); } catch (const std::exception&) {}
+    }
+    const int gems = static_cast<int>(me.gem_count());
+    // Objective = tiles of groups that are alive or waiting to be captured; drop groups seen respawning.
+    if (!S.camp_tiles.is_empty()) {
+        const auto visible = c::vision::visible_tiles();
+        c::bitboard live;
+        live.clear();
+        for (std::size_t i = 0; i < S.groups.size(); ++i) {
+            bool keep = true;
+            if (!(S.group_tiles[i] & visible).is_empty()) {
+                try { keep = !std::holds_alternative<c::map::camp_group_respawning>(S.groups[i].state()); }
+                catch (const std::exception&) {}
+            }
+            if (keep) live = live | S.group_tiles[i];
+        }
+        S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+    }
+    vec2 bank_altar{-1, -1};
+    for (auto a : S.altars) if (cheb(pos, a) <= 1) bank_altar = a;
+
+    if (foes.empty() && camps.empty() && !(gems > 0 && bank_altar.x >= 0)) {
+        // Fixed rule only when nothing is in view: heal at spawn if hurt, else head for the objective.
         if (my_frac < 0.9f) { if (!S.own_spawn.is_set(pos)) step_along(*S.home, blocked); return; }
-        step_along(*S.enemy_home, blocked);
+        step_along(*S.objective, blocked);
         return;
     }
-    S.last_seen = foes[0].pos;
-    S.last_seen_round = round;
+    if (!foes.empty()) { S.last_seen = foes[0].pos; S.last_seen_round = round; }
 
     // ---- spells ----
     std::vector<Spell> spells;
@@ -180,6 +221,19 @@ void play() {
                 if (cheb(q, foes[i].pos) <= my_range && (atk_t < 0 || foes[i].hp < foes[atk_t].hp)) atk_t = i;
         add(q, -1, atk_t, atk_t >= 0);
         if (atk_t >= 0) add(q, -1, -1, false);  // also allow holding the attack
+        if (me.can_attack() && (stay || !S.ranged))
+            for (int ci = 0; ci < static_cast<int>(camps.size()); ++ci)
+                if (cheb(q, camps[ci].spawn_position()) <= my_range) {
+                    Opt o{q, -1, -1, true};
+                    o.camp = ci;
+                    opts.push_back(o);
+                    break;
+                }
+        if (stay && gems > 0 && bank_altar.x >= 0) {
+            Opt o{q, -1, -1, false};
+            o.bank = true;
+            opts.push_back(o);
+        }
         for (int si = 0; si < static_cast<int>(spells.size()); ++si) {
             const auto& s = spells[si];
             if (s.offensive) {
@@ -188,7 +242,7 @@ void play() {
                     if (cheb(pos, foes[i].pos) <= 4) add(q, si, i, atk_t >= 0);
             } else if (s.reset || s.shield) {
                 add(q, si, atk_t, atk_t >= 0);
-            } else if (s.dash && stay) {
+            } else if (s.dash && stay && !foes.empty()) {
                 // Dash two tiles straight toward or away from the nearest foe.
                 const vec2 f = foes[0].pos;
                 for (int sign : {1, -1}) {
@@ -204,13 +258,15 @@ void play() {
     for (auto& o : opts) {
         const vec2 q = o.dest;
         const Spell* sp = o.spell >= 0 ? &spells[o.spell] : nullptr;
+        const bool has_foe = !foes.empty();
         const int ti = o.target >= 0 ? o.target : 0;
-        const Foe& f = foes[ti];
-        const int d0 = cheb(pos, f.pos), d1 = cheb(q, f.pos);
+        static const Foe none{nullptr, vec2{0, 0}, 1.0f, 1.0f, 0.0f, 0, false, false};
+        const Foe& f = has_foe ? foes[ti] : none;
+        const int d0 = has_foe ? cheb(pos, f.pos) : 0, d1 = has_foe ? cheb(q, f.pos) : 0;
         const float closing = static_cast<float>(d0 - d1);
-        float dmg = o.atk ? my_str : 0.0f;
+        float dmg = (o.atk && o.camp < 0 && has_foe) ? my_str : 0.0f;
         if (sp && sp->offensive) dmg += sp->amount;
-        if (sp && sp->reset && o.atk) dmg += my_str;
+        if (sp && sp->reset && o.atk && o.camp < 0) dmg += my_str;
         float threat = 0;
         for (const auto& e : foes) if (cheb(q, e.pos) <= e.reach) threat += e.dps;
         threat /= my_max;
@@ -222,7 +278,7 @@ void play() {
             threat,
             threat * (1 - my_frac),
             -closing,
-            d1 / 10.0f,
+            has_foe ? d1 / 10.0f : 0.0f,
             S.own_spawn.is_set(q) ? 1.0f : 0.0f,
             home_q / 20.0f,
             stun,
@@ -231,12 +287,17 @@ void play() {
             (sp && sp->dash) ? 1.0f : 0.0f,
             my_frac * closing,
             (f.hp / f.maxhp) * closing,
-            o.atk ? 1.0f : 0.0f,
-            d1 <= my_range ? 1.0f : 0.0f,
+            (o.atk && o.camp < 0) ? 1.0f : 0.0f,
+            (has_foe && d1 <= my_range) ? 1.0f : 0.0f,
             ready_count * closing,
             threat * (f.hp / f.maxhp),
             (1 - my_frac) * static_cast<float>(home_now - home_q),
             (f.channel ? 1.0f : 0.0f) * stun,
+            o.camp >= 0 ? 1.0f : 0.0f,
+            static_cast<float>(fv(*S.objective, pos) - fv(*S.objective, q)),
+            o.bank ? 1.0f : 0.0f,
+            gems / 50.0f * threat,
+            gems / 50.0f * static_cast<float>(fv(*S.altar, pos) - fv(*S.altar, q)),
         };
         float s = 0;
         for (int i = 0; i < NF; ++i) s += W[i] * x[i];
@@ -253,7 +314,8 @@ void play() {
         return nullptr;
     };
     try {
-        if (sp && sp->offensive && best->target >= 0) {
+        if (best->bank) { me.submit_gems(bank_altar); return; }
+        if (sp && sp->offensive && best->target >= 0 && !foes.empty()) {
             if (auto ab = ability(sp->slot)) {
                 const auto& f = foes[best->target];
                 if (sp->aoe) ab->use(f.pos); else ab->use(*f.h);
@@ -265,7 +327,9 @@ void play() {
             me.move_absolute(best->dest);
         }
         if (sp && sp->shield) if (auto ab = ability(sp->slot)) ab->use();
-        if (best->atk && best->target >= 0 && me.can_attack()) {
+        if (best->atk && best->camp >= 0 && me.can_attack()) {
+            me.attack(camps[best->camp]);
+        } else if (best->atk && best->target >= 0 && me.can_attack()) {
             me.attack(*foes[best->target].h);
             if (sp && sp->reset) {
                 if (auto ab = ability(sp->slot)) {

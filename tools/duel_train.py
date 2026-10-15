@@ -8,7 +8,8 @@ pick the candidate played. Opponents: the current mean policy plus a hall of fam
   .venv/Scripts/python tools/duel_train.py matrix r1 [--size 1]       # learned matchup table
   .venv/Scripts/python tools/duel_train.py matrix prior               # table for the hand prior
 
-Game score (candidate side): kill difference + 0.1 x champion-damage difference / 1000.
+Game score (candidate side): kill difference + 0.1 x champion-damage difference / 1000
++ banked-gem difference / 50 (the arenas have contested gem clusters, so hiding loses).
 """
 import argparse
 import hashlib
@@ -70,7 +71,8 @@ def side_score(r, seat):
     if "error" in r:
         return -5.0
     us, them = r["teams"][seat], r["teams"][1 - seat]
-    return (us["kills"] - them["kills"]) + 0.1 * (us.get("dmg", 0) - them.get("dmg", 0)) / 1000
+    gems = (r["gems"][seat] - r["gems"][1 - seat]) / 50 if "gems" in r else 0.0
+    return (us["kills"] - them["kills"]) + 0.1 * (us.get("dmg", 0) - them.get("dmg", 0)) / 1000 + gems
 
 
 def train(a):
@@ -86,8 +88,7 @@ def train(a):
         if a.init_from:
             # Curriculum warm start: previous run's learned weights; new feature columns start at 0.
             old = current_mean(pickle.loads((OUT / a.init_from / "state.pkl").read_bytes()))
-            prior = np.zeros((12, NF))
-            prior[:, :old.shape[1]] = old[:, :NF]
+            prior[:, :old.shape[1]] = old[:, :NF]   # new feature columns keep the hand prior
             print(f"warm start from {a.init_from} ({old.shape[1]} -> {NF} features)")
         st = {"gen": 0, "hof": [], "es": {}, "init_from": a.init_from}
         for p, rows in ROWS.items():

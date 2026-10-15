@@ -31,8 +31,11 @@ def encode_picks(m: mf.MapData, row: int, picks):
 def layout(name: str, n: int) -> mf.MapData:
     m = mf.MapData(width=W, height=H, symmetry=mf.ROTATIONAL180, champions=n)
     m.spawn_a = (13, 7, 16, 10)          # 3x3; team B mirrored at (14..16, 20..22)
-    m.altar[3][14] = 1                   # one altar per side (mirror pair) so banking code has a target
+    m.altar[3][14] = 1                   # one altar per side (mirror pair), behind each spawn
     m.altar[26][15] = 1
+    # Contested objective: harmless gem clusters (24 gems, 50-round respawn) in the middle, plus one
+    # pair nearer each side. Only one side of each mirror pair is stored; the engine mirrors camps.
+    m.camps = [(2, 11, 15), (2, 7, 9)]
     if name == "pillars":
         # A few wall pillars and bush patches between the spawns (mirrored by hand below).
         for x, y in [(9, 14), (10, 14), (19, 13), (20, 13), (14, 15), (15, 14)]:

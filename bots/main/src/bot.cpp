@@ -202,9 +202,12 @@ void build_fields(std::uint64_t reserve) {
         for (int i = 0; i < static_cast<int>(W.groups.size()); ++i) order.push_back(i);
         std::sort(order.begin(), order.end(), [](int a, int b) { return W.groups[a].home_d < W.groups[b].home_d; });
     }
-    while (W.next_field < order.size() && c::fuel_remaining() > reserve) {
+    static std::uint64_t last_cost = 12000;  // measured cost of the previous field (map-size dependent)
+    while (W.next_field < order.size() && c::fuel_remaining() > reserve + last_cost + last_cost / 4) {
+        const auto f0 = c::fuel_remaining();
         auto& g = W.groups[order[W.next_field++]];
-        g.field = make_field(g.tile_bb);
+        if (!g.field) g.field = make_field(g.tile_bb);
+        last_cost = f0 - c::fuel_remaining();
     }
 }
 
@@ -432,6 +435,12 @@ float my_dps() {
 
 int squad_of(int b) { return b % std::max(1, SQUADS); }
 
+// A dead group whose capture an ally is already holding (rewards split, so I should move on).
+bool covered(const Group& g, vec2 me) {
+    if (!g.reward_known || g.tile_bb.is_set(me)) return false;
+    return !(c::vision::champion_tiles(team::ally) & g.tile_bb).is_empty();
+}
+
 int choose_target(vec2 pos, int round, float hp, const std::array<std::uint8_t, 8>& claims) {
     const int my_squad = squad_of(W.body);
     int k = 0;
@@ -440,7 +449,8 @@ int choose_target(vec2 pos, int round, float hp, const std::array<std::uint8_t, 
     for (int b = 0; b < W.body && b < 8; ++b)
         if (squad_of(b) == my_squad && claims[b] > 0 && claims[b] <= W.groups.size()) {
             const int t = claims[b] - 1;
-            if (W.groups[t].ready_round <= round + 3) return t;  // ignore a lead target I know is respawning
+            // Ignore a lead target I know is respawning, or whose capture an ally already holds.
+            if (W.groups[t].ready_round <= round + 3 && !(CAPTURE_HANDOFF && covered(W.groups[t], pos))) return t;
         }
 
     const float dps = my_dps();
@@ -453,6 +463,7 @@ int choose_target(vec2 pos, int round, float hp, const std::array<std::uint8_t, 
         auto& g = W.groups[i];
         const int d = group_dist(g, pos);
         if (d >= UNREACH) continue;
+        if (CAPTURE_HANDOFF && covered(g, pos)) continue;
         int n_other = 0;
         for (int b = 0; b < W.bodies && b < 8; ++b)
             if (squad_of(b) != my_squad && claims[b] == i + 1) ++n_other;

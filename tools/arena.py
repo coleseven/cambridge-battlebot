@@ -67,6 +67,11 @@ def build(path: Path, name: str | None = None) -> Bot:
     return Bot(name or path.name, path, sha(wasm))
 
 
+def _float_lit(lit: str) -> str:
+    """C++ float literals need a '.' or exponent before the 'f' suffix (2 -> 2.0)."""
+    return lit if any(ch in lit for ch in ".eE") else lit + ".0"
+
+
 def write_params(text: str, values: dict) -> str:
     """Rewrite `constexpr <type> NAME = <number>;` lines (or `#define NAME number`)."""
     for name, value in values.items():
@@ -74,7 +79,7 @@ def write_params(text: str, values: dict) -> str:
             f"{value:.6g}" if isinstance(value, float) else str(int(value)))
         new, n = re.subn(rf"^(\s*(?:(?:static|inline)\s+)*constexpr\s+([\w:<> ]+?)\s+{re.escape(name)}\s*=\s*)"
                          rf"(?:[-+0-9.eE]+f?|true|false)(\s*;)",
-                         lambda m: m.group(1) + (lit + "f" if "float" in m.group(2) and not isinstance(value, bool)
+                         lambda m: m.group(1) + (_float_lit(lit) + "f" if "float" in m.group(2) and not isinstance(value, bool)
                                                  and lit not in ("true", "false") else lit) + m.group(3),
                          text, count=1, flags=re.M)
         if not n:

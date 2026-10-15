@@ -54,3 +54,5 @@ constexpr int FLEE_GEMS = 20;
 constexpr int CAMP_WALLS = 0;
 // 1 = keep my squad claim while recalling, shopping or dead; 0 = clear it.
 constexpr int KEEP_CLAIM = 0;
+// 1 = leave a dead group to the ally already standing on it and move to the next target.
+constexpr int CAPTURE_HANDOFF = 0;

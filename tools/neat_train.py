@@ -201,10 +201,11 @@ def blob(programs: dict, resign: int):
 
 
 # ---------------------------------------------------------------- slot bots
-def build_slots(n):
+def build_slots(n, kind="neatslots"):
+    """Pre-built network-bot copies whose genome block is patched per genome (one dir per trainer kind)."""
     slots = []
     for i in range(n):
-        d = arena.ARENA / "neatslots" / f"s{i:02d}"
+        d = arena.ARENA / kind / f"s{i:02d}"
         if not (d / "src").exists():
             import shutil
             shutil.copytree(SRC / "src", d / "src")

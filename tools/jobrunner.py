@@ -14,6 +14,7 @@ Usage: .venv/Scripts/python tools/jobrunner.py [--root .arena/jobs] [--poll 15]
 """
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -34,6 +35,14 @@ def git(*args):
 
 def write_status(root, **kw):
     (root / "status.json").write_text(json.dumps({"host": socket.gethostname(), "at": now(), **kw}, indent=1))
+
+
+def native_cmd(cmd: str) -> str:
+    """Job files use forward slashes; cmd.exe needs backslashes in the program path (first token)."""
+    if os.name != "nt":
+        return cmd
+    head, sep, rest = cmd.partition(" ")
+    return head.replace("/", "\\") + sep + rest
 
 
 def next_job(queue):
@@ -95,7 +104,7 @@ def main():
         with log.open("a", encoding="utf-8") as out:
             out.write(f"# {now()} {spec['cmd']}\n")
             out.flush()
-            rc = subprocess.run(spec["cmd"], shell=True, cwd=spec.get("cwd", str(ROOT)), stdout=out,
+            rc = subprocess.run(native_cmd(spec["cmd"]), shell=True, cwd=spec.get("cwd", str(ROOT)), stdout=out,
                                 stderr=subprocess.STDOUT).returncode
         spec.update(returncode=rc, finished=now(), seconds=round(time.time() - t0))
         dest = root / ("done" if rc == 0 else "failed") / f.name

@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
+import dist  # noqa: E402
 import duel_maps  # noqa: E402
 import duel_train  # noqa: E402
 import mapformat as mf  # noqa: E402
@@ -174,7 +175,7 @@ def evaluate(nt, progs, hero, sched, team_progs, elite_bot, anchor, cand_slots, 
                 ob = elite_bot if kind == "elite" else anchor
                 games.append((bot, ob, map_path(size, layout, own, opp))); meta.append((i, size, 0))
                 games.append((ob, bot, map_path(size, layout, opp, own))); meta.append((i, size, 1))
-        res = arena.play_many(games, a.jobs)
+        res = dist.play_many(games, a.jobs, root=getattr(a, "dist", None))
         acc = {}
         for (i, size, seat), r in zip(meta, res):
             if "error" not in r and a.resign and r["round"] > a.resign + 2:
@@ -197,6 +198,7 @@ def add_args(r):
     r.add_argument("--warm-run", default="", help="N>1: warm-start from this 1v1 run (same trainer kind)")
     r.add_argument("--warm-arena", default="", help="N>1: .arena holding --warm-run and the 1v1 champion "
                    "set (read-only; default this checkout's .arena)")
+    dist.add_arg(r)
 
 
 # ---------------------------------------------------------------- tests

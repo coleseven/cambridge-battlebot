@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
+import dist  # noqa: E402
 import cgp_train as cg  # noqa: E402
 import duel_train  # noqa: E402
 import neat_train as nt  # noqa: E402
@@ -70,6 +71,7 @@ def main():
     ap.add_argument("--resign", type=int, default=800)
     ap.add_argument("--team-size", type=int, default=1)
     ap.add_argument("--pairings", type=int, default=12, help="N > 1: sampled team pairings per hero")
+    dist.add_arg(ap)
     a = ap.parse_args()
     n = a.team_size
     slots = nt.build_slots(len(a.contestants), "leagueslots")
@@ -91,7 +93,7 @@ def main():
                     games.append((bots[x], bots[y], nt.map_path(lay, p, q))); meta.append((x, y, p, q, 0))
                     games.append((bots[y], bots[x], nt.map_path(lay, q, p))); meta.append((x, y, p, q, 1))
     t0 = time.perf_counter()
-    res = arena.play_many(games, a.jobs, progress=True)
+    res = dist.play_many(games, a.jobs, progress=True, root=a.dist)
     pair, hero = {}, {}
     for (x, y, p, q, flip), r in zip(meta, res):
         s = duel_train.side_score(r, 1 if flip else 0)      # from x's point of view, x playing hero p

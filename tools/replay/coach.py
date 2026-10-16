@@ -11,7 +11,7 @@ Pipeline:
 
   .venv/Scripts/python tools/replay/coach.py collect-ladder --latest 30
   .venv/Scripts/python tools/replay/coach.py collect-duels --top 8
-  .venv/Scripts/python tools/replay/coach.py submit --run r1 [--limit 3] [--model claude-opus-5-5] [--effort medium]
+  .venv/Scripts/python tools/replay/coach.py submit --run r1 [--limit 3] [--model claude-haiku-5-5] [--effort medium]
   .venv/Scripts/python tools/replay/coach.py results --run r1
 
 Credentials come from the environment (ANTHROPIC_API_KEY or an `ant auth login` profile); this script
@@ -297,7 +297,7 @@ def main():
     c = sub.add_parser("collect-duels"); c.add_argument("--top", type=int, default=8); c.add_argument("--resign", type=int, default=800)
     s = sub.add_parser("submit"); s.add_argument("--run", required=True); s.add_argument("--limit", type=int)
     s.add_argument("--dry-run", action="store_true", help="build summaries and estimate cost; no API call")
-    s.add_argument("--model", default="claude-opus-5-5"); s.add_argument("--effort", default="medium",
+    s.add_argument("--model", default="claude-haiku-5-5"); s.add_argument("--effort", default="medium",
                    choices=["low", "medium", "high", "xhigh", "max"])
     r = sub.add_parser("results"); r.add_argument("--run", required=True)
     a = ap.parse_args()

@@ -177,8 +177,9 @@ def run(a):
         layout = grng.choice(["open", "pillars"])
         summary = {}
         for p, islands in st["islands"].items():
-            elite_bot = nt.patch(elite_slot, nt.blob({r: program(st["elite"][q]) for q in ROWS for r in ROWS[q]},
-                                                     a.resign), "elite")
+            champs = (nt.champion_programs() if a.opp == "champions" else None) or {}
+            elite_bot = nt.patch(elite_slot, nt.blob({r: champs.get(q) or program(st["elite"][q])
+                                                      for q in ROWS for r in ROWS[q]}, a.resign), "elite")
             opps = grng.sample(range(len(PICKS)), a.opps)
             cands = []                                   # (island, genome); parent first per island
             for i, isl in enumerate(islands):
@@ -223,6 +224,8 @@ def main():
     r.add_argument("--lam", type=int, default=4); r.add_argument("--opps", type=int, default=4)
     r.add_argument("--slots", type=int, default=8); r.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS)
     r.add_argument("--resign", type=int, default=800)
+    r.add_argument("--opp", choices=["champions", "own"], default="champions",
+                   help="evolving opponents: the cross-method champion set (default) or this run's own elites")
     e = sub.add_parser("export"); e.add_argument("name")
     a = ap.parse_args()
     {"run": run, "export": export}[a.cmd](a)

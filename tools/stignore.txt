@@ -6,5 +6,6 @@
 !/neat
 !/cgp
 !/runs
+!/champions
 !/jobs
 *

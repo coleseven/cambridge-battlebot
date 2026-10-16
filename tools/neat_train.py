@@ -283,6 +283,15 @@ def anchor_bot(slot_dir, resign):
     return patch(slot_dir, blob({}, resign), "anchor")
 
 
+def champion_programs():
+    """Current per-hero champion set (tools/champions.py), or None."""
+    path = arena.ARENA / "champions" / "current.json"
+    if not path.exists():
+        return None
+    d = json.loads(path.read_text())
+    return {PICKS.index(h): w for h, w in d["programs"].items() if w}
+
+
 def map_path(layout, a, b):
     return arena.ROOT / "maps_duel" / "1v1" / f"{layout}__{PICKS[a]}-{PICKS[b]}.map26a"
 
@@ -329,8 +338,9 @@ def run(a):
         summary = {}
         for p, pop in st["pops"].items():
             elite_progs = {}
+            champs = champion_programs() if a.opp == "champions" else None
             for q, eg in st["elites"].items():
-                prog = program(eg, config)
+                prog = (champs or {}).get(q) or program(eg, config)   # champion set first, own elite as fallback
                 if prog:
                     for r in ROWS[q]:
                         elite_progs[r] = prog
@@ -391,6 +401,8 @@ def main():
     r.add_argument("--gens", type=int, default=1000); r.add_argument("--pop", type=int, default=30)
     r.add_argument("--opps", type=int, default=4); r.add_argument("--slots", type=int, default=8)
     r.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS); r.add_argument("--resign", type=int, default=800)
+    r.add_argument("--opp", choices=["champions", "own"], default="champions",
+                   help="evolving opponents: the cross-method champion set (default) or this run's own elites")
     e = sub.add_parser("export"); e.add_argument("name")
     a = ap.parse_args()
     {"run": run, "export": export}[a.cmd](a)

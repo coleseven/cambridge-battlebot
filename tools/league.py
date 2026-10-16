@@ -5,6 +5,7 @@ Contestants (pick any; default all):
   neat:<run>   NEAT elites exported to .arena/neat/<run>/elites.json
   cgp:<run>    CGPANN current elites from .arena/cgp/<run>/state.pkl
   lin:<run>    a CMA duel run's linear weights, encoded as an equivalent network
+  champ        the per-hero champion set (.arena/champions/current.json, tools/champions.py)
   prior        the hand prior (empty genome block -> the bot's built-in linear weights)
 
   .venv/Scripts/python tools/league.py neat:n2 cgp:c2 lin:d2 prior [--jobs 12] [--resign 800]
@@ -33,6 +34,9 @@ def programs(spec):
     """Contestant spec -> {pick: program words} (empty dict = hand prior)."""
     if spec == "prior":
         return {}
+    if spec == "champ":
+        d = json.loads((arena.ARENA / "champions" / "current.json").read_text())
+        return {PICKS.index(h): w for h, w in d["programs"].items() if w}
     kind, run = spec.split(":")
     if kind == "neat":
         el = json.loads((arena.ARENA / "neat" / run / "elites.json").read_text())

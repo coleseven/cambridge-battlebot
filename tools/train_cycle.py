@@ -1,7 +1,7 @@
 """Run several resumable trainers in turn, forever (the training PC's standing job).
 
 Each round runs every trainer for --block generations (each resumes from its own checkpoint), then
-exports its elites, so best networks for every method keep landing in the synced .arena folder.
+exports its elites and refreshes the per-hero champion set (tools/champions.py) both trainers fight, so best networks for every method keep landing in the synced .arena folder.
 Stop it by deleting the job's file from .arena/jobs/running (or killing the process); restarting resumes.
 
   .venv/Scripts/python -u tools/train_cycle.py --block 5 --seed-from d2 --neat n1 --cgp c1 --jobs 4
@@ -44,6 +44,9 @@ def main():
                 time.sleep(30)
                 continue
             step([tool, "export", name])
+        if a.neat and a.cgp:
+            # Refresh the per-hero champion set both trainers use as their evolving opponents.
+            step(["tools/champions.py", "--neat", a.neat, "--cgp", a.cgp, "--jobs", str(a.jobs)])
 
 
 if __name__ == "__main__":

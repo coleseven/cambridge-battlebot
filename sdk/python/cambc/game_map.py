@@ -174,7 +174,8 @@ class CampGroup:
 
     def state(self) -> CampGroupState:
         """Return the group's current state."""
-        if (_bc.vision() & self.spawn_tiles()).is_empty():
+        vision = _bc.vision()
+        if not any(vision.is_set(camp.spawn_position()) for camp in self._camps):
             raise Error(ErrorCode.API_NOT_IN_VISION, "camp group is not in vision")
         state = _bc.camp_group_state(self._handle)
         if state == 1:

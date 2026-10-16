@@ -42,17 +42,18 @@ fn state() -> Result<&'static State> {
         Error::invalid_argument("SDK initialization failed; call cambc::init() for the error")
     })
 }
-/// Reset the thread-local test cache; leaked fixture states preserve existing static borrows.
+/// Reset the thread-local test caches; leaked fixture states preserve existing static borrows.
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     STATE.with(|state| {
         state.borrow_mut().take();
     });
+    crate::board::reset_layout_for_tests();
 }
 /// Initialise immutable SDK data. A static constructor runs this before `main` on the first
 /// turn's fuel, so calling it is only needed to retry or inspect a failed initialisation.
 /// Successful repeat calls do nothing; failures publish nothing and can be retried.
-/// No map layout is cached.
+/// The map layout is cached after the first successful query.
 pub fn init() -> Result<()> {
     if initialized().is_some() {
         return Ok(());
@@ -330,7 +331,7 @@ impl CampGroup {
     }
     /// Build the camp-spawn tiles; computed on every call.
     pub fn spawn_tiles(&self) -> Result<Bitboard> {
-        let mut mask = Bitboard::new()?;
+        let mut mask = Bitboard::uninit()?;
         self.spawn_tiles_into(&mut mask)?;
         Ok(mask)
     }
@@ -643,6 +644,15 @@ pub struct Teleport {
     remaining_time: i32,
 }
 impl Teleport {
+    fn decode(i: sys::TeleportInfo) -> Result<Self> {
+        Ok(Self {
+            champion: ChampionHandle(i.champion),
+            kind: ChampionType::try_from(i.kind)?,
+            team: Team::from_absolute(i.team as i32)?,
+            destination: i.destination,
+            remaining_time: i.timer,
+        })
+    }
     /// Construct a live wrapper for the teleport caster, preserving host visibility errors.
     pub fn champion(&self) -> Result<Champion> {
         Champion::new(self.champion)
@@ -944,15 +954,7 @@ pub fn has_teleport(position: Vec2) -> Result<bool> {
 pub fn teleports() -> Result<Vec<Teleport>> {
     crate::list(|p, n, out| unsafe { sys::teleports(p, n, out) })?
         .into_iter()
-        .map(|i| {
-            Ok(Teleport {
-                champion: ChampionHandle(i.champion),
-                kind: ChampionType::try_from(i.kind)?,
-                team: Team::from_absolute(i.team as i32)?,
-                destination: i.destination,
-                remaining_time: i.timer,
-            })
-        })
+        .map(Teleport::decode)
         .collect()
 }
 /// Return the visible teleport reservation at `position`.
@@ -960,15 +962,22 @@ pub fn teleports() -> Result<Vec<Teleport>> {
 /// # Arguments
 /// * `position` - Tile to query.
 pub fn teleport_at(position: Vec2) -> Result<Teleport> {
-    if has_teleport(position)? {
-        if let Some(t) = teleports()?.into_iter().find(|t| t.position() == position) {
-            return Ok(t);
+    let info = query(|p| unsafe { sys::teleport_at(position.x, position.y, p) });
+    match info {
+        Ok(i) => Teleport::decode(i),
+        Err(e)
+            if matches!(
+                e.code(),
+                Some(ErrorCode::ApiNotFound | ErrorCode::ApiNotInVision)
+            ) =>
+        {
+            Err(Error::local(
+                ErrorCode::ApiNotFound,
+                "no visible teleport at position",
+            ))
         }
+        Err(e) => Err(e),
     }
-    Err(Error::local(
-        ErrorCode::ApiNotFound,
-        "no visible teleport at position",
-    ))
 }
 /// Return an owning visible altar lock at `position`, preferring ally then enemy.
 ///

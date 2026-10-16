@@ -17,7 +17,9 @@ def champion_tiles(team: Optional[Team] = None) -> Bitboard:
         team: Team to include, or None for both teams.
     """
     if team is None:
-        return _bc.ally_occupancy() | _bc.enemy_occupancy()
+        out = _bc.ally_occupancy()
+        out |= _bc.enemy_occupancy()
+        return out
     if team == Team.ALLY:
         return _bc.ally_occupancy()
     if team == Team.ENEMY:
@@ -64,7 +66,9 @@ def ward_tiles(team: Optional[Team] = None) -> Bitboard:
         team: Team to include, or None for both teams.
     """
     if team is None:
-        return _bc.ally_ward_occupancy() | _bc.enemy_ward_occupancy()
+        out = _bc.ally_ward_occupancy()
+        out |= _bc.enemy_ward_occupancy()
+        return out
     _absolute_team(team)
     return _bc.ally_ward_occupancy() if team == Team.ALLY else _bc.enemy_ward_occupancy()
 
@@ -177,7 +181,9 @@ def altar_lock_tiles(team: Optional[Team] = None) -> Bitboard:
         team: Team to include, or None for both teams.
     """
     if team is None:
-        return _bc.ally_altar_lock_occupancy() | _bc.enemy_altar_lock_occupancy()
+        out = _bc.ally_altar_lock_occupancy()
+        out |= _bc.enemy_altar_lock_occupancy()
+        return out
     _absolute_team(team)
     return _bc.ally_altar_lock_occupancy() if team == Team.ALLY else _bc.enemy_altar_lock_occupancy()
 

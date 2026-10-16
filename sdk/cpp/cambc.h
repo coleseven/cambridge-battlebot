@@ -839,6 +839,15 @@ public:
 		return positions;
 	}
 
+	/// Write the positions of set map tiles into `out` and return how many were written.
+	/// @param out Destination buffer; at most `out.size()` positions are written.
+	[[nodiscard]] std::uint32_t positions_into(std::span<vec2> out) const
+	{
+		std::uint32_t count{};
+		detail::check(detail::sdk_Bitboard_GetSetBits(ptr(), out.data(), out.size(), &count));
+		return count;
+	}
+
 	/// Print the buffer through the engine.
 	void print() const { detail::check(detail::sdk_Bitboard_Print(ptr())); }
 
@@ -2969,6 +2978,41 @@ namespace map
 class camp_group;
 } // namespace map
 
+/// An individual camp's captured lifecycle. States are mutually exclusive, not flags.
+class camp_state
+{
+public:
+	/// Underlying mutually exclusive engine values; alive means awake.
+	enum class enum_type : std::uint32_t { dead = 0, alive = 1, asleep = 2 };
+	static const camp_state dead;
+	static const camp_state alive;
+	static const camp_state asleep;
+	/// Construct the dead state.
+	constexpr camp_state() noexcept = default;
+	/// Wrap an underlying enum value without changing its identity.
+	constexpr camp_state(enum_type state) noexcept : value_{ state } {}
+	/// Convert to the underlying engine enum.
+	[[nodiscard]] constexpr operator enum_type() const noexcept { return value_; }
+	/// Explicit integer conversion for host ABI values.
+	template <class T> requires std::is_integral_v<T>
+	[[nodiscard]] constexpr explicit operator T() const noexcept { return static_cast<T>(value_); }
+	/// Check whether the captured state is dead.
+	[[nodiscard]] constexpr bool is_dead() const noexcept { return value_ == enum_type::dead; }
+	/// Check whether the captured state is living, including asleep camps.
+	[[nodiscard]] constexpr bool is_alive() const noexcept { return value_ != enum_type::dead; }
+	/// Check whether the captured state is awake (the alive enum value).
+	[[nodiscard]] constexpr bool is_awake() const noexcept { return value_ == enum_type::alive; }
+	/// Check whether the captured state is living but dormant.
+	[[nodiscard]] constexpr bool is_asleep() const noexcept { return value_ == enum_type::asleep; }
+
+private:
+	enum_type value_{};
+};
+
+inline constexpr camp_state camp_state::dead{ enum_type::dead };
+inline constexpr camp_state camp_state::alive{ enum_type::alive };
+inline constexpr camp_state camp_state::asleep{ enum_type::asleep };
+
 /// A runtime camp, with public spawn metadata and visibility-checked combat queries.
 class camp : public unit
 {
@@ -3000,6 +3044,28 @@ public:
 	[[nodiscard]] vec2 spawn_position() const noexcept { return spawn_position_; }
 	/// Query this camp's group from the engine on every call; invalid identities throw.
 	[[nodiscard]] map::camp_group camp_group() const;
+	/// Query dead, alive (awake), or asleep. The current tile, or last occupied tile when dead,
+	/// must be in vision; hidden camps throw api_not_in_vision. This is separate from the camp-group state.
+	[[nodiscard]] camp_state state() const
+	{
+		std::uint32_t value{};
+		detail::check(detail::sdk_camp_state(static_cast<std::uint32_t>(handle_), &value));
+		switch (value)
+		{
+		case 0: return camp_state::dead;
+		case 1: return camp_state::alive;
+		case 2: return camp_state::asleep;
+		default: throw error{ error_code::api_value_out_of_range, "unknown engine camp state" };
+		}
+	}
+	/// Query whether this camp is dead; uses the same visibility checks as state().
+	[[nodiscard]] bool is_dead() const { return state().is_dead(); }
+	/// Query whether this camp is living (awake or asleep); uses the same visibility checks as state().
+	[[nodiscard]] bool is_alive() const { return state().is_alive(); }
+	/// Query whether this camp is awake; uses the same visibility checks as state().
+	[[nodiscard]] bool is_awake() const { return state().is_awake(); }
+	/// Query whether this camp is living but dormant; uses the same visibility checks as state().
+	[[nodiscard]] bool is_asleep() const { return state().is_asleep(); }
 	/// Query current health; live state requires a visible runtime identity.
 	[[nodiscard]] float health() const override { return info().health; }
 	/// Query current maximum health; live state requires a visible runtime identity.
@@ -3083,19 +3149,15 @@ class ability
 	ability(handle_champion_t owner, std::uint32_t slot) : owner_{ static_cast<std::uint32_t>(owner) }, slot_{ slot }
 	{
 		detail::ability_props props{};
-		try
+		const auto code = detail::sdk_champion_ability_props(owner_, slot_, &props);
+		if (code == static_cast<std::int32_t>(error_code::api_not_in_vision))
 		{
-			detail::check(detail::sdk_champion_ability_props(owner_, slot_, &props));
-			if (props.kind == 0)
-				return;
-		}
-		catch (const error& failure)
-		{
-			if (failure.code() != error_code::api_not_in_vision)
-				throw;
-			info_error_ = failure;
+			info_error_ = error{ code };
 			return;
 		}
+		detail::check(code);
+		if (props.kind == 0)
+			return;
 		initialize(props);
 	}
 
@@ -4662,11 +4724,13 @@ inline void visible_tiles_into(bitboard& out)
 /// @param position Tile to query.
 [[nodiscard]] inline teleport teleport_at(vec2 position)
 {
-	if (has_teleport(position))
-		for (const auto& value : teleports())
-			if (value.position() == position)
-				return value;
-	throw error{ error_code::api_not_found, "no visible teleport at position" };
+	detail::teleport_info value{};
+	const auto code = detail::sdk_teleport_at(position.x, position.y, &value);
+	if (code == static_cast<std::int32_t>(error_code::api_not_in_vision) ||
+		code == static_cast<std::int32_t>(error_code::api_not_found))
+		throw error{ error_code::api_not_found, "no visible teleport at position" };
+	detail::check(code);
+	return teleport{ value };
 }
 
 /// Like `altar_lock_tiles`, but writes into `out` instead of returning a new board.
@@ -5065,6 +5129,36 @@ inline bool champion::move_towards(vec2 target) const
 }
 
 } // namespace cambc
+
+namespace cambc::detail
+{
+#ifdef CAMBC_DEBUG
+/// Fuel pause/resume guard behind the `debug_block` macro.
+struct DebugGuard
+{
+	DebugGuard() { sdk_fuel_pause(); }
+	~DebugGuard() { sdk_fuel_resume(); }
+	DebugGuard(const DebugGuard&) = delete;
+	DebugGuard& operator=(const DebugGuard&) = delete;
+};
+#endif
+} // namespace cambc::detail
+
+/// Run the statements without spending fuel when the bot is built in debug
+/// mode (`cambc run`, the default); skipped entirely in release mode
+/// (`--release`, and always on the platform). The free budget per block is
+/// 1000 turns, beyond which the rest of the block is charged; ending the
+/// turn inside a block closes the free window.
+/// A macro: the code runs inline — `break`/`continue` apply to the enclosing
+/// loop, `return` leaves the enclosing function and fuel resumes on the way
+/// out. In release mode the code is type-checked but never evaluated. Call
+/// it unqualified (`debug_block({ ... });`), not as `cambc::debug_block`,
+/// and use no preprocessor directives inside.
+#ifdef CAMBC_DEBUG
+#define debug_block(...) if (::cambc::detail::DebugGuard _cambc_debug_guard{}; true) { __VA_ARGS__ } else (void)0
+#else
+#define debug_block(...) if (false) { __VA_ARGS__ } else (void)0
+#endif
 
 /// Hashes both coordinates; consistent with vec2 equality.
 template <>

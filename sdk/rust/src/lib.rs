@@ -199,3 +199,59 @@ pub(crate) fn require_self(handle: ChampionHandle) -> Result<()> {
         Ok(())
     }
 }
+
+#[doc(hidden)]
+pub mod __private {
+    #[cfg(cambc_debug)]
+    pub struct DebugGuard;
+    #[cfg(cambc_debug)]
+    impl DebugGuard {
+        pub fn pause() -> Self {
+            unsafe { crate::sys::fuel_pause() };
+            DebugGuard
+        }
+    }
+    #[cfg(cambc_debug)]
+    impl Drop for DebugGuard {
+        fn drop(&mut self) {
+            unsafe { crate::sys::fuel_resume() }
+        }
+    }
+}
+
+/// Run the statements without spending fuel when the bot is built in debug
+/// mode (`cambc run`, the default); skipped entirely in release mode
+/// (`--release`, and always on the platform). The free budget per block is
+/// 1000 turns, beyond which the rest is charged; ending the turn inside
+/// closes the free window.
+///
+/// A macro: `debug_block! { statements }` runs the body inline, so `return`
+/// and `?` leave the enclosing function (fuel resumes on the way out). In
+/// release mode the body is type-checked but never evaluated.
+#[cfg(cambc_debug)]
+#[macro_export]
+macro_rules! debug_block {
+    ($($body:tt)*) => {{
+        let _guard = $crate::__private::DebugGuard::pause();
+        $($body)* ;
+    }};
+}
+
+/// Run the statements without spending fuel when the bot is built in debug
+/// mode (`cambc run`, the default); skipped entirely in release mode
+/// (`--release`, and always on the platform). The free budget per block is
+/// 1000 turns, beyond which the rest is charged; ending the turn inside
+/// closes the free window.
+///
+/// A macro: `debug_block! { statements }` runs the body inline, so `return`
+/// and `?` leave the enclosing function (fuel resumes on the way out). In
+/// release mode the body is type-checked but never evaluated.
+#[cfg(not(cambc_debug))]
+#[macro_export]
+macro_rules! debug_block {
+    ($($body:tt)*) => {
+        if false {
+            $($body)* ;
+        }
+    };
+}

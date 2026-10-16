@@ -11,6 +11,21 @@ impl TryFrom<$ty> for $name {type Error = Error; fn try_from(value:$ty) -> Resul
 }
 engine_enum!(Symmetry,i32,{Horizontal = 0,Vertical = 1,Rotational180 = 2});
 engine_enum!(CampType,i32,{Wolf = 0,Elk = 1,GemCluster = 2,GoldCluster = 3,Monolith = 4});
+engine_enum!(CampState,u32,{Dead = 0,Alive = 1,Asleep = 2});
+impl CampState {
+    #[must_use]
+    /// Check whether the captured state is dead.
+    pub const fn is_dead(self) -> bool { matches!(self, Self::Dead) }
+    #[must_use]
+    /// Check whether the captured state is living, including asleep camps.
+    pub const fn is_alive(self) -> bool { !self.is_dead() }
+    #[must_use]
+    /// Check whether the captured state is awake (the `Alive` enum value).
+    pub const fn is_awake(self) -> bool { matches!(self, Self::Alive) }
+    #[must_use]
+    /// Check whether the captured state is living but dormant.
+    pub const fn is_asleep(self) -> bool { matches!(self, Self::Asleep) }
+}
 engine_enum!(PassiveType,u8,{None = 0,BonusGold = 1,RemoteShop = 2,GemFocus = 3,SplashAttack = 4,HealthStrength = 5,ResetCooldownsOnKill = 6,Retaliation = 7,StunImmunity = 8});
 engine_enum!(ChampionDraft,i32,{Ryth = 0,VesperVale = 1,Vendetta = 2,CassiAndIssac = 3,Stellar = 4,Prism = 5,Marcella = 6,Willow = 7,Ren = 8,Varg = 9,Tavi = 10});
 engine_enum!(ChampionType,i32,{Ryth = 0,VesperVale = 1,Vendetta = 2,Cassi = 3,Issac = 4,Stellar = 5,Prism = 6,Marcella = 7,Willow = 8,Ren = 9,Varg = 10,Tavi = 11});

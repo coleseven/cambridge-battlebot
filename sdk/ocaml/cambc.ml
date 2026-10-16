@@ -38,6 +38,7 @@ module Sys = struct
   external board_teleport_occupancy : int -> int = "cambc_board_teleport_occupancy"
   external is_occupied_by_teleport : int -> int -> int -> int = "cambc_is_occupied_by_teleport"
   external teleports : int -> int -> int -> int = "cambc_teleports"
+  external teleport_at : int -> int -> int -> int = "cambc_teleport_at"
   external board_ward_vision_mask : int -> int -> int -> int = "cambc_board_ward_vision_mask"
   external board_ally_altar_lock_occupancy : int -> int = "cambc_board_ally_altar_lock_occupancy"
   external board_enemy_altar_lock_occupancy : int -> int = "cambc_board_enemy_altar_lock_occupancy"
@@ -94,6 +95,7 @@ module Sys = struct
   external map_camp_at : int -> int -> int -> int = "cambc_map_camp_at"
   external camp_group_cooldown : int -> int -> int = "cambc_camp_group_cooldown"
   external camp_group_state : int -> int -> int = "cambc_camp_group_state"
+  external camp_state : int -> int -> int = "cambc_camp_state"
   external camp_buffs : int -> int -> int -> int -> int = "cambc_camp_buffs"
   external bc_camp_group_max_respawn : int -> int -> int = "cambc_bc_camp_group_max_respawn"
   external camp : int -> int -> int = "cambc_camp"
@@ -114,6 +116,9 @@ module Sys = struct
   external debug_line : int -> int -> int -> int -> int -> int = "cambc_debug_line"
   external yield : int -> int = "cambc_yield"
   external fuel_remaining : int -> int = "cambc_fuel_remaining"
+  external debug_enabled : int -> int = "cambc_debug_enabled"
+  external fuel_pause : int -> int = "cambc_fuel_pause"
+  external fuel_resume : int -> int = "cambc_fuel_resume"
   external bc_bitboard_one : Bytes.t -> int = "cambc_bc_Bitboard_One_gc"
   external bc_bitboard_importrawbuffer : Bytes.t -> Bytes.t -> int -> int = "cambc_bc_Bitboard_ImportRawBuffer_gc"
   external bc_bitboard_importlinearbuffer : Bytes.t -> Bytes.t -> int -> int = "cambc_bc_Bitboard_ImportLinearBuffer_gc"
@@ -1345,7 +1350,9 @@ module Consumable = struct
   type info = { cost : int; carry_limit : int }
 
   let all = [ Tp_crystal; Altar_lock ]
-  let to_int = function Tp_crystal -> 0 | Altar_lock -> 1
+  let index = function Tp_crystal -> 0 | Altar_lock -> 1
+  (* Engine IDs retain the retired control-ward slot at 1. *)
+  let to_int = function Tp_crystal -> 0 | Altar_lock -> 2
   let to_string = function Tp_crystal -> "Tp_crystal" | Altar_lock -> "Altar_lock"
 
   let info k =
@@ -1373,15 +1380,13 @@ end
 module Consumable_counts = struct
   type t = int array
 
-  let get t k = t.(Consumable.to_int k)
+  let get t k = t.(Consumable.index k)
   let iter f t = List.iter (fun k -> f k (get t k)) Consumable.all
   let fold f t init = List.fold_left (fun acc k -> f k (get t k) acc) init Consumable.all
   let to_list t = List.map (fun k -> (k, get t k)) Consumable.all
 
   let read o =
-    let a = Array.make (List.length Consumable.all) 0 in
-    List.iter (fun k -> let i = Consumable.to_int k in a.(i) <- u32 (o + (4 * i))) Consumable.all;
-    a
+    Array.of_list (List.map (fun k -> u32 (o + (4 * Consumable.to_int k))) Consumable.all)
 end
 
 (* Board layout: width, height, board bytes, field bytes, slot size. *)
@@ -1421,6 +1426,8 @@ module Bitboard = struct
 
   let size () = (Lazy.force layout).board_bytes
   let create () = Bytes.make (size ()) '\000'
+  (* Result buffer the host fully overwrites; contents uninitialised on error. *)
+  let uninit () = Bytes.create (size ())
   let copy = Bytes.copy
   let width _ = (Lazy.force layout).w
   let height _ = (Lazy.force layout).h
@@ -1432,14 +1439,13 @@ module Bitboard = struct
 
   (* Run a host query writing a board to linear slot 7 and return it as a new board. *)
   let query_into f out =
-    clear out;
-    load 7 out;
-    check (f (slot 7));
-    store 7 out
+    let code = f (slot 7) in
+    if code <> 0 then begin clear out; check code end
+    else store 7 out
 
-  let query f = let out = create () in query_into f out; out
+  let query f = let out = uninit () in query_into f out; out
 
-  let make f = let b = create () in check (f b); b
+  let make f = let b = uninit () in check (f b); b
   let fill t = check (Sys.bc_bitboard_one t)
   let is_set t (p : Vec2.t) = query_bool (Sys.bc_bitboard_test t p.x p.y)
   let set t (p : Vec2.t) v = check (Sys.bc_bitboard_set t p.x p.y (Bool.to_int v))
@@ -1448,7 +1454,8 @@ module Bitboard = struct
   let count t = query_u32 (Sys.bc_bitboard_numsetbits t)
 
   let positions t =
-    let n = count t in
+    let l = Lazy.force layout in
+    let n = l.w * l.h in
     let base = list_area () in
     (ensure (base + (n * 8) + 16));
     let written = query_u32 (Sys.bc_bitboard_getsetbits t base n) in
@@ -1467,11 +1474,11 @@ module Bitboard = struct
   let intersect_assign = assign Sys.bc_bitboard_intersect
   let xor_assign = assign Sys.bc_bitboard_xor
   let shift_right_into t n out = check (Sys.bc_bitboard_shiftright t out n)
-  let shift_right t n = let out = create () in shift_right_into t n out; out
+  let shift_right t n = let out = uninit () in shift_right_into t n out; out
   let shift_up_into t n out = check (Sys.bc_bitboard_shiftup t out n)
-  let shift_up t n = let out = create () in shift_up_into t n out; out
+  let shift_up t n = let out = uninit () in shift_up_into t n out; out
   let reflect_into t s out = check (Sys.bc_bitboard_reflect t out (Symmetry.to_int s))
-  let reflect t s = let out = create () in reflect_into t s out; out
+  let reflect t s = let out = uninit () in reflect_into t s out; out
   let reflect_horizontal_into t out = reflect_into t Symmetry.Horizontal out
   let reflect_horizontal t = let out = create () in reflect_horizontal_into t out; out
   let reflect_vertical_into t out = reflect_into t Symmetry.Vertical out
@@ -1493,7 +1500,7 @@ module Bitboard = struct
         check (Sys.bc_bitboard_reachablemaskwithscratch [| t; out; frontier; scr |] p.x p.y distance)
 
   let reachable_tiles ?scratch t p ~distance =
-    let out = create () in
+    let out = uninit () in
     reachable_tiles_into ?scratch t p ~distance out;
     out
 
@@ -1501,7 +1508,7 @@ module Bitboard = struct
     check (Sys.bc_bitboard_shadowcast t p.x p.y out distance)
 
   let shadow_cast t p ~distance =
-    let out = create () in
+    let out = uninit () in
     shadow_cast_into t p ~distance out;
     out
   let import f t (b : Bytes.t) = check (f t b (Bytes.length b))
@@ -2217,7 +2224,8 @@ module Camp_group = struct
   let spawn_tiles_into g out = Bytes.blit g.g_mask 0 out 0 (Bytes.length out)
 
   let state g =
-    if Bitboard.is_empty (Bitboard.intersect (Bitboard.query Sys.board_vision) g.g_mask) then
+    let vision = Bitboard.query Sys.board_vision in
+    if not (List.exists (fun c -> Bitboard.is_set vision c.spawn) g.members) then
       fail Error_code.Api_not_in_vision "camp group is not visible";
     match query_u32 (Sys.camp_group_state g.g_handle) with
     | 0 -> fail Error_code.Api_not_in_vision "camp group state is unknown"
@@ -2227,8 +2235,29 @@ module Camp_group = struct
     | v -> fail Error_code.Api_value_out_of_range (Printf.sprintf "invalid camp group state: %d" v)
 end
 
+module Camp_state = struct
+  type t = Dead | Alive | Asleep
+  let is_dead = function Dead -> true | Alive | Asleep -> false
+  let is_alive s = not (is_dead s)
+  let is_awake = function Alive -> true | Dead | Asleep -> false
+  let is_asleep = function Asleep -> true | Dead | Alive -> false
+end
+
 module Camp = struct
   type t = camp
+  type state = Camp_state.t = Dead | Alive | Asleep
+
+  let state c =
+    match query_u32 (Sys.camp_state c.camp_handle) with
+    | 0 -> Dead
+    | 1 -> Alive
+    | 2 -> Asleep
+    | v -> fail Error_code.Api_value_out_of_range (Printf.sprintf "invalid camp state: %d" v)
+
+  let is_dead c = Camp_state.is_dead (state c)
+  let is_alive c = Camp_state.is_alive (state c)
+  let is_awake c = Camp_state.is_awake (state c)
+  let is_asleep c = Camp_state.is_asleep (state c)
 
   type base_stats = {
     vision_radius : float;
@@ -2364,7 +2393,7 @@ module Vision = struct
 
   let camp_groups () =
     let v = visible_tiles () in
-    List.filter (fun g -> not (Bitboard.is_empty (Bitboard.intersect g.g_mask v))) (all_camp_groups ())
+    List.filter (fun g -> List.exists (fun c -> Bitboard.is_set v c.spawn) g.members) (all_camp_groups ())
 
   let wards ?team () =
     List.filter
@@ -2385,12 +2414,11 @@ module Vision = struct
   let has_teleport (p : Vec2.t) = query_bool (Sys.is_occupied_by_teleport p.x p.y)
   let teleports () = List.map Teleport.decode (host_list 28 Sys.teleports)
 
-  let teleport_at p =
-    let found =
-      if has_teleport p then List.find_opt (fun (t : Teleport.t) -> Vec2.equal t.position p) (teleports ())
-      else None
-    in
-    match found with Some t -> t | None -> fail Error_code.Api_not_found "no teleport at position"
+  let teleport_at (p : Vec2.t) =
+    match Sys.teleport_at p.x p.y rec_ with
+    | 0 -> Teleport.decode rec_
+    | 98 -> fail Error_code.Api_not_found "no teleport at position"
+    | code -> check code; Teleport.decode rec_
 
   let teleport_at_opt p = optional teleport_at p
 
@@ -2541,6 +2569,11 @@ let champions ?team () =
 
 let round_number () = query_u32 Sys.bc_round_number
 let global_submitted_gems team = query_u32 (Sys.bc_submitted_gems (team_abs team))
+
+let debug_block f =
+  if Sys.debug_enabled 0 <> 0 then (
+    ignore (Sys.fuel_pause 0);
+    Fun.protect ~finally:(fun () -> ignore (Sys.fuel_resume 0)) f)
 
 let fuel_remaining () =
   ignore (Sys.fuel_remaining out);

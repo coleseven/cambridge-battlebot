@@ -87,7 +87,13 @@ export function locateAssets(explicit) {
   // Prefer the visualiser copy, newest first.
   dirs.sort((a, b) => (b.includes('visualiser') - a.includes('visualiser')) || fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   const d = dirs[0], names = fs.readdirSync(d);
-  return { dir: d, wasm: path.join(d, names.find((n) => /^v\d+_\d+_\d+-.*\.wasm$/.test(n))), panel: path.join(d, names.find((n) => /^PanelChrome-.*\.js$/.test(n))) };
+  // A visualiser build can ship several engine versions (v0_0_1, v0_0_2, ...): one per game version.
+  // List them newest first; decodeWithAnyEngine tries each until one accepts the replay.
+  const ver = (n) => n.match(/^v(\d+)_(\d+)_(\d+)-/).slice(1).map(Number);
+  const wasms = names.filter((n) => /^v\d+_\d+_\d+-.*\.wasm$/.test(n))
+    .sort((x, y) => { const a = ver(x), b = ver(y); return b[0] - a[0] || b[1] - a[1] || b[2] - a[2]; })
+    .map((n) => path.join(d, n));
+  return { dir: d, wasm: wasms[0], wasms, panel: path.join(d, names.find((n) => /^PanelChrome-.*\.js$/.test(n))) };
 }
 
 export async function loadEngine(assets) {
@@ -336,13 +342,26 @@ async function main() {
   const files = inputs.flatMap((f) => fs.statSync(f).isDirectory()
     ? fs.readdirSync(f).filter((n) => /\.(zip|repl26a)$/i.test(n)).map((n) => path.join(f, n)) : [f]);
   const assets = locateAssets(assetsDir);
-  const engine = await loadEngine(assets);
-  engine.wasmName = assets.wasm;
+  const engines = [];                      // loaded lazily, newest version first
+  async function decodeWithAnyEngine(f) {
+    let lastErr = null;
+    for (let i = 0; i < assets.wasms.length; i++) {
+      if (!engines[i]) {
+        engines[i] = await loadEngine({ ...assets, wasm: assets.wasms[i] });
+        engines[i].wasmName = assets.wasms[i];
+      }
+      try { return await decodeReplay(f, engines[i]); } catch (e) {
+        lastErr = e;
+        if (!/Game_FromReplayFileBytes/.test(e.message)) throw e;   // only version mismatches fall through
+      }
+    }
+    throw lastErr;
+  }
   const many = files.length > 1 || (out && fs.existsSync(out) && fs.statSync(out).isDirectory());
   if (many && out) fs.mkdirSync(out, { recursive: true });
   for (const f of files) {
     try {
-      const tl = await decodeReplay(f, engine);
+      const tl = await decodeWithAnyEngine(f);
       const json = JSON.stringify(tl);
       const dest = !out ? null : many ? path.join(out, path.basename(f).replace(/\.(zip|repl26a)$/i, '') + '.timeline.json') : out;
       if (dest) fs.writeFileSync(dest, json); else process.stdout.write(json + '\n');

@@ -123,7 +123,11 @@ def fetch_group(c, out, gid, limit=None):
             continue
         if limit is not None and n >= limit:
             break
-        save_match(c, out, m["id"], sidecar(g, m))
+        try:
+            save_match(c, out, m["id"], sidecar(g, m))
+        except Exception as e:  # noqa: BLE001 - a missing/expired bundle should not stop the batch
+            print(f"skip {m['id']}: {e}", file=sys.stderr)
+            continue
         n += 1
     return n
 

@@ -470,7 +470,7 @@ void play() {
         float net_best_s = 0;
         bool complete = true;
         for (std::size_t i = 0; i < order.size() && i < NET_TOP_K; ++i) {
-            if (f0 - c::fuel_remaining() > NET_FUEL_CAP || c::fuel_remaining() < 15000) { complete = false; break; }
+            if (f0 - c::fuel_remaining() > NET_FUEL_CAP || c::fuel_remaining() < (TEAM ? 20000u : 15000u)) { complete = false; break; }
             const float v = run_net<NX>(order[i]->x.data());
             if (!net_best || v > net_best_s) { net_best = order[i]; net_best_s = v; }
         }

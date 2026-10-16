@@ -28,7 +28,7 @@ def load():
     """{pick: program words} of the current champion set, or None if there is none yet."""
     if not OUT.exists():
         return None
-    d = json.loads(OUT.read_text())
+    d = json.loads(OUT.read_text(encoding="utf-8"))
     return {PICKS.index(h): w for h, w in d["programs"].items() if w}
 
 

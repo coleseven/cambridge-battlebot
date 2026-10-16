@@ -30,14 +30,14 @@ import arena  # noqa: E402
 
 PICKS = ["ryth", "vesper", "vendetta", "ci", "stellar", "prism", "marcella", "willow", "ren", "varg", "tavi"]
 ROWS = {0: [0], 1: [1], 2: [2], 3: [3, 4], 4: [5], 5: [6], 6: [7], 7: [8], 8: [9], 9: [10], 10: [11]}
-NF = int((Path(__file__).resolve().parent.parent / "bots" / "duel" / "src" / "weights.h").read_text()
+NF = int((Path(__file__).resolve().parent.parent / "bots" / "duel" / "src" / "weights.h").read_text(encoding="utf-8")
          .split("constexpr int NF = ")[1].split(";")[0])
 DUEL_SRC = arena.ROOT / "bots" / "duel" / "src"
 OUT = arena.ARENA / "duel"
 
 
 def prior_matrix():
-    text = (DUEL_SRC / "weights.h").read_text()
+    text = (DUEL_SRC / "weights.h").read_text(encoding="utf-8")
     start = text.index("PRIOR[NF] = {") + len("PRIOR[NF] = {")
     vals = [float(v.strip().rstrip("f")) for v in text[start:text.index("};", start)].split(",") if v.strip()]
     return np.tile(np.array(vals), (12, 1))
@@ -45,7 +45,7 @@ def prior_matrix():
 
 def weights_header(m):
     rows = ",\n".join("    {" + ", ".join(f"{v:.5f}f" for v in r) + "}" for r in m)
-    text = (DUEL_SRC / "weights.h").read_text()
+    text = (DUEL_SRC / "weights.h").read_text(encoding="utf-8")
     head = text[: text.index("constexpr float WEIGHTS")]
     return head + "constexpr float WEIGHTS[12][NF] = {\n" + rows + ",\n};\n"
 

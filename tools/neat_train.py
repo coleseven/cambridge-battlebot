@@ -267,7 +267,7 @@ def seed_rows(seed_from, min_vs_prior=0.0):
     mpath = duel_train.OUT / f"matrix_{seed_from}_vsprior.json"
     vs = None
     if mpath.exists():
-        tab = json.loads(mpath.read_text())["table"]
+        tab = json.loads(mpath.read_text(encoding="utf-8"))["table"]
         vs = {p: sum(tab[p]) / len(tab[p]) for p in range(len(PICKS))}
     out = {}
     for p, rows in ROWS.items():
@@ -288,7 +288,7 @@ def champion_programs():
     path = arena.ARENA / "champions" / "current.json"
     if not path.exists():
         return None
-    d = json.loads(path.read_text())
+    d = json.loads(path.read_text(encoding="utf-8"))
     return {PICKS.index(h): w for h, w in d["programs"].items() if w}
 
 

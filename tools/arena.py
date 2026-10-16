@@ -194,7 +194,7 @@ def play(a: Bot, b: Bot, map_path: Path, keep_replay: Path | None = None) -> dic
         if not stats_file.exists():
             res = {"error": (r.stdout[-1500:] + r.stderr[-1500:])}
         else:
-            res = _summarise(json.loads(stats_file.read_text()))
+            res = _summarise(json.loads(stats_file.read_text(encoding="utf-8")))
     finally:
         shutil.rmtree(out, ignore_errors=True)
     res = {"key": key, "map": map_path.stem, **res}

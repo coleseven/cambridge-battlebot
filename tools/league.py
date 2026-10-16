@@ -35,11 +35,11 @@ def programs(spec):
     if spec == "prior":
         return {}
     if spec == "champ":
-        d = json.loads((arena.ARENA / "champions" / "current.json").read_text())
+        d = json.loads((arena.ARENA / "champions" / "current.json").read_text(encoding="utf-8"))
         return {PICKS.index(h): w for h, w in d["programs"].items() if w}
     kind, run = spec.split(":")
     if kind == "neat":
-        el = json.loads((arena.ARENA / "neat" / run / "elites.json").read_text())
+        el = json.loads((arena.ARENA / "neat" / run / "elites.json").read_text(encoding="utf-8"))
         return {PICKS.index(h): w for h, w in el["programs"].items() if w}
     if kind == "cgp":
         st = pickle.loads((arena.ARENA / "cgp" / run / "state.pkl").read_bytes())

@@ -54,7 +54,7 @@ def main():
         if not stats:
             print(f"SKIP {f.name}: no statistics")
             continue
-        out = subprocess.run(["node", str(HERE / "decode.mjs"), str(f)], capture_output=True, text=True)
+        out = subprocess.run(["node", str(HERE / "decode.mjs"), str(f)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if out.returncode:
             print(f"FAIL {f.name}: decode error {out.stderr.strip()[-300:]}")
             bad += 1; n += 1

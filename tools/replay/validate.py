@@ -38,6 +38,8 @@ def stats_for(p):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):   # team names include emoji; Windows consoles default to cp1252
+        stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("--timelines", help="also write decoded timelines here")

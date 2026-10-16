@@ -7,6 +7,12 @@ fighters rather than only its own elites.
 
   .venv/Scripts/python tools/champions.py --neat n2 --cgp c2 [--jobs 4] [--resign 800]
 Writes .arena/champions/current.json: {"programs": {hero: words}, "source": {hero: method}, ...}.
+
+  --team-size N (N > 1): compares the two methods' N-v-N elites on sampled team pairings (per hero,
+  --pairings pairings with that hero in the NEAT team, both seats; NEAT's whole team plays NEAT
+  networks and CGP's plays CGP networks). Every game's NEAT-side score counts toward the margin of each
+  hero in either team. Writes .arena/champions/current_<N>v<N>.json, which the N-v-N trainers use as
+  allies and evolving opponents.
 """
 import argparse
 import json
@@ -19,6 +25,7 @@ import arena  # noqa: E402
 import duel_train  # noqa: E402
 import league  # noqa: E402
 import neat_train as nt  # noqa: E402
+import nvn  # noqa: E402
 
 PICKS, ROWS = nt.PICKS, nt.ROWS
 OUT = arena.ARENA / "champions" / "current.json"
@@ -26,10 +33,7 @@ OUT = arena.ARENA / "champions" / "current.json"
 
 def load():
     """{pick: program words} of the current champion set, or None if there is none yet."""
-    if not OUT.exists():
-        return None
-    d = json.loads(OUT.read_text(encoding="utf-8"))
-    return {PICKS.index(h): w for h, w in d["programs"].items() if w}
+    return nvn.load_programs(OUT) if OUT.exists() else None
 
 
 def main():
@@ -38,33 +42,45 @@ def main():
     ap.add_argument("--cgp", default="c2")
     ap.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS)
     ap.add_argument("--resign", type=int, default=800)
+    ap.add_argument("--team-size", type=int, default=1)
+    ap.add_argument("--pairings", type=int, default=6, help="N > 1: sampled team pairings per hero")
     a = ap.parse_args()
+    n = a.team_size
     specs = {"neat": f"neat:{a.neat}", "cgp": f"cgp:{a.cgp}"}
     progs = {k: league.programs(s) for k, s in specs.items()}
     slots = nt.build_slots(2, "champslots")
     bots = {k: nt.patch(slot, nt.blob({r: progs[k][p] for p in progs[k] for r in ROWS[p]}, a.resign), k)
             for k, slot in zip(("neat", "cgp"), slots)}
     games, meta = [], []
-    for lay in ("open", "pillars"):
+    if n > 1:
         for p in range(len(PICKS)):
-            for q in range(len(PICKS)):
-                games.append((bots["neat"], bots["cgp"], nt.map_path(lay, p, q))); meta.append((p, 0))
-                games.append((bots["cgp"], bots["neat"], nt.map_path(lay, q, p))); meta.append((p, 1))
+            for _, lay, own, opp, _ in nvn.schedule(n, 0, p, a.pairings, 0, seed="champions"):
+                games.append((bots["neat"], bots["cgp"], nvn.map_path(n, lay, own, opp))); meta.append((set(own) | set(opp), 0))
+                games.append((bots["cgp"], bots["neat"], nvn.map_path(n, lay, opp, own))); meta.append((set(own) | set(opp), 1))
+    else:
+        for lay in ("open", "pillars"):
+            for p in range(len(PICKS)):
+                for q in range(len(PICKS)):
+                    games.append((bots["neat"], bots["cgp"], nt.map_path(lay, p, q))); meta.append(({p}, 0))
+                    games.append((bots["cgp"], bots["neat"], nt.map_path(lay, q, p))); meta.append(({p}, 1))
     t0 = time.perf_counter()
     res = arena.play_many(games, a.jobs)
     score = {p: [] for p in range(len(PICKS))}
-    for (p, seat), r in zip(meta, res):
-        score[p].append(duel_train.side_score(r, seat))       # NEAT's score when NEAT plays hero p
+    for (heroes, seat), r in zip(meta, res):
+        for p in heroes:
+            score[p].append(duel_train.side_score(r, seat))   # NEAT's score in a game involving hero p
     chosen, source, margin = {}, {}, {}
     for p in range(len(PICKS)):
         m = sum(score[p]) / len(score[p])
         k = "neat" if m >= 0 else "cgp"
         chosen[PICKS[p]], source[PICKS[p]], margin[PICKS[p]] = progs[k].get(p), specs[k], round(m, 2)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    tmp = OUT.with_suffix(".tmp")
+    out = nvn.champions_file(n)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "neat": a.neat, "cgp": a.cgp,
-                               "source": source, "neat_margin": margin, "programs": chosen}, indent=1))
-    tmp.replace(OUT)
+                               "team_size": n, "nf": nvn.NF, "source": source, "neat_margin": margin,
+                               "programs": chosen}, indent=1))
+    tmp.replace(out)
     print(f"{len(games)} games in {time.perf_counter() - t0:.0f}s; champion per hero (NEAT margin, + = NEAT better):")
     for h in PICKS:
         print(f"  {h:9} {source[h]:9} {margin[h]:+.2f}")

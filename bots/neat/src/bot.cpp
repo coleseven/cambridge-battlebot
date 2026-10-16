@@ -39,6 +39,8 @@ struct State {
     std::vector<c::map::camp_group> groups;
     std::vector<c::bitboard> group_tiles;
     std::vector<vec2> altars;
+    c::bitboard objective_live;
+    bool objective_ok = false;
     vec2 last_seen{-1, -1};
     int last_seen_round = -1000;
 };
@@ -62,6 +64,7 @@ struct Net {
     std::vector<Eval> evals;
     std::vector<std::pair<int, float>> links;
     int out = 0;
+    int base = NF_V1;   // first hidden slot: NF_V1 when the net reads no team feature (see load_net)
 };
 Net NET;
 std::uint32_t RESIGN_ROUND = 0;
@@ -73,13 +76,16 @@ void load_net(int type) {
     if (GENOME_BLOB[0] != 0x4E454154u || GENOME_BLOB[1] != 0x424C4F42u || type < 0 || type > 11) return;
     std::uint32_t o = GENOME_BLOB[5 + type];
     if (o == 0 || o >= GENOME_WORDS) return;
+    // Format 1 blobs were written for NF_V1 features: shift their hidden/output slots up to NF.
+    const int base = GENOME_BLOB[3] == 1u ? NF_V1 : NF;
+    auto remap = [base](int s) { return s >= base ? s - base + NF : s; };
     const std::uint32_t n = GENOME_BLOB[o++];
     if (n == 0 || n > static_cast<std::uint32_t>(MAX_NODES)) return;
     const int max_slot = NF + MAX_NODES;
     for (std::uint32_t i = 0; i < n; ++i) {
         if (o + 5 >= GENOME_WORDS) return;
         Eval e{};
-        e.node = static_cast<int>(GENOME_BLOB[o++]);
+        e.node = remap(static_cast<int>(GENOME_BLOB[o++]));
         e.act = static_cast<int>(GENOME_BLOB[o++]);
         e.bias = word_float(GENOME_BLOB[o++]);
         e.resp = word_float(GENOME_BLOB[o++]);
@@ -88,21 +94,33 @@ void load_net(int type) {
         if (e.node < NF || e.node >= max_slot || e.count < 0 || NET.links.size() + e.count > static_cast<std::size_t>(MAX_LINKS)) return;
         for (int k = 0; k < e.count; ++k) {
             if (o + 1 >= GENOME_WORDS) return;
-            const int src = static_cast<int>(GENOME_BLOB[o++]);
+            const int src = remap(static_cast<int>(GENOME_BLOB[o++]));
             const float w = word_float(GENOME_BLOB[o++]);
             if (src < 0 || src >= max_slot) return;
             NET.links.push_back({src, w});
         }
         NET.evals.push_back(e);
     }
-    NET.out = static_cast<int>(GENOME_BLOB[o]);
+    NET.out = remap(static_cast<int>(GENOME_BLOB[o]));
     NET.ok = NET.out >= 0 && NET.out < max_slot;
+    // A net that reads no team feature (every 1v1 net) runs in the duel layout (hidden slots from NF_V1),
+    // so its per-option fuel, and hence the NN fuel cap's cut-off, is exactly as in the 25-feature bot.
+    bool team_inputs = false;
+    for (const auto& l : NET.links) team_inputs |= l.first >= NF_V1 && l.first < NF;
+    if (NET.ok && !team_inputs) {
+        auto down = [](int s) { return s >= NF ? s - (NF - NF_V1) : s; };
+        for (auto& l : NET.links) l.first = down(l.first);
+        for (auto& e : NET.evals) e.node = down(e.node);
+        NET.out = down(NET.out);
+        NET.base = NF_V1;
+    }
 }
 
+template <int BASE>
 float run_net(const float* x) {
-    float v[NF + MAX_NODES];
-    for (int i = 0; i < NF; ++i) v[i] = x[i];
-    for (int i = NF; i < NF + MAX_NODES; ++i) v[i] = 0.0f;
+    float v[BASE + MAX_NODES];
+    for (int i = 0; i < BASE; ++i) v[i] = x[i];
+    for (int i = BASE; i < BASE + MAX_NODES; ++i) v[i] = 0.0f;
     for (const auto& e : NET.evals) {
         float s = 0.0f;
         for (int k = 0; k < e.count; ++k) s += v[NET.links[e.first + k].first] * NET.links[e.first + k].second;
@@ -168,7 +186,8 @@ struct Spell {
     float amount;
 };
 
-struct Opt {
+template <int NX>
+struct OptT {
     vec2 dest;
     int spell = -1;  // index into spells
     int target = -1; // foe index for spell/attack
@@ -176,7 +195,7 @@ struct Opt {
     int camp = -1;   // camp index attacked instead of a foe
     bool bank = false;
     float score = -1e30f;
-    std::array<float, NF> x{};
+    std::array<float, NX> x{};
 };
 
 bool step_along(const c::distance_field& f, const c::bitboard& blocked) {
@@ -194,9 +213,23 @@ bool step_along(const c::distance_field& f, const c::bitboard& blocked) {
     try { return me.move_absolute(to); } catch (const std::exception&) { return false; }
 }
 
+#if BOT_FUEL
+std::uint64_t FUEL_MAX = 0;
+#endif
+
+// Allies seen this turn (team path only).
+struct Ally { vec2 pos; float frac; int range; };
+std::vector<Ally> ALLIES;
+
+// TEAM = the loaded network reads team features (NET.base == NF). Without it (every 1v1 network and
+// the hand prior) the team features could not change any score, so they are not computed at all and
+// this instantiation is the 25-feature duel code, instruction for instruction: the per-turn fuel, and
+// therefore the fuel_remaining() floor that cuts the NN shortlist short, match the old bot exactly.
+template <bool TEAM>
 void play() {
+    constexpr int NX = TEAM ? NF : NF_V1;
+    using Opt = OptT<NX>;
     auto& me = c::self();
-    if (!S.ready) init();
     if (RESIGN_ROUND && S.team_a && c::round_number() >= RESIGN_ROUND) c::resign();  // end the duel early
     if (!me.is_alive()) return;
     if (me.is_recalling() || me.is_submitting_gems() || me.is_teleporting()) return;
@@ -225,6 +258,22 @@ void play() {
         } catch (const std::exception&) {}
     }
 
+    // ---- visible allies (other bodies of our team; empty in a 1v1 except for Cassi & Issac) ----
+    const auto& allies = ALLIES;
+    if constexpr (TEAM) {
+        ALLIES.clear();
+        auto tiles = c::vision::champion_tiles(team::ally);
+        tiles.set(pos, false);
+        if (!tiles.is_empty())
+            for (const auto& e : c::vision::champions(team::ally)) {
+                try {
+                    if (!e.is_alive() || e.position() == pos) continue;
+                    ALLIES.push_back(Ally{e.position(), e.health() / std::max(1.0f, e.max_health()),
+                                          static_cast<int>(e.attack_range())});
+                } catch (const std::exception&) {}
+            }
+    }
+
     // Harmless clusters in view (the contested objective).
     std::vector<c::camp> camps;
     for (const auto& m : c::vision::camps()) {
@@ -244,7 +293,17 @@ void play() {
             }
             if (keep) live = live | S.group_tiles[i];
         }
-        S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+        if constexpr (TEAM) {
+            // Team path only (the duel path stays byte-for-byte as before): rebuild the objective field
+            // only when the set of live groups changes; it is the largest per-turn fuel cost in a crowd.
+            if (!S.objective_ok || !(live == S.objective_live)) {
+                S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+                S.objective_live = live;
+                S.objective_ok = true;
+            }
+        } else {
+            S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+        }
     }
     vec2 bank_altar{-1, -1};
     for (auto a : S.altars) if (cheb(pos, a) <= 1) bank_altar = a;
@@ -343,7 +402,7 @@ void play() {
         threat /= my_max;
         const float stun = (sp && sp->offensive && sp->stun) ? 1.0f : 0.0f;
         const int home_q = fv(*S.home, q);
-        float x[NF] = {
+        float x[NX] = {
             dmg / f.maxhp,
             dmg >= f.hp ? 1.0f : 0.0f,
             threat,
@@ -370,8 +429,29 @@ void play() {
             gems / 50.0f * threat,
             gems / 50.0f * static_cast<float>(fv(*S.altar, pos) - fv(*S.altar, q)),
         };
+        if constexpr (TEAM) {
+            // Team features: allies on the target, nearest ally, local counts around the target.
+            float on_target = 0, near_target = 0, near_foes = 0, ally_d = 0, ally_frac = 0;
+            int best_ad = 1 << 20;
+            for (const auto& al : allies) {
+                if (has_foe && cheb(al.pos, f.pos) <= al.range) on_target += 1;
+                if (has_foe && cheb(al.pos, f.pos) <= 3) near_target += 1;
+                const int ad = cheb(q, al.pos);
+                if (ad < best_ad) { best_ad = ad; ally_d = ad / 10.0f; ally_frac = al.frac; }
+            }
+            if (has_foe)
+                for (int i = 0; i < static_cast<int>(foes.size()); ++i)
+                    if (i != ti && cheb(foes[i].pos, f.pos) <= 3) near_foes += 1;
+            const bool hits = dmg > 0;
+            x[NF_V1 + 0] = hits ? on_target : 0.0f;
+            x[NF_V1 + 1] = ally_d;
+            x[NF_V1 + 2] = ally_frac;
+            x[NF_V1 + 3] = near_target;
+            x[NF_V1 + 4] = near_foes;
+            x[NF_V1 + 5] = (f.stunned && on_target > 0 && (hits || closing > 0)) ? 1.0f : 0.0f;
+        }
         float s = 0;
-        for (int i = 0; i < NF; ++i) s += W[i] * x[i];
+        for (int i = 0; i < NX; ++i) s += W[i] * x[i];
         o.score = s;
         std::memcpy(o.x.data(), x, sizeof(x));
     }
@@ -391,9 +471,12 @@ void play() {
         bool complete = true;
         for (std::size_t i = 0; i < order.size() && i < NET_TOP_K; ++i) {
             if (f0 - c::fuel_remaining() > NET_FUEL_CAP || c::fuel_remaining() < 15000) { complete = false; break; }
-            const float v = run_net(order[i]->x.data());
+            const float v = run_net<NX>(order[i]->x.data());
             if (!net_best || v > net_best_s) { net_best = order[i]; net_best_s = v; }
         }
+#if BOT_FUEL
+        std::cout << "NN " << S.type << " " << (f0 - c::fuel_remaining()) << " " << complete << " " << c::fuel_remaining() << std::endl;
+#endif
         if (complete && net_best) best = net_best;
     }
     if (!best) return;
@@ -439,7 +522,18 @@ void play() {
 
 void Bot::play_turn() {
     try {
-        play();
+#if BOT_FUEL
+        // Fuel probe build (tools/nvn.py fuel): worst turn so far, excluding each body's first turn (init).
+        const bool first = !S.ready;
+        const auto f0 = c::fuel_remaining();
+        if (!S.ready) init();
+        if (NET.base == NF) play<true>(); else play<false>();
+        const auto used = f0 - c::fuel_remaining();
+        if (!first && used > FUEL_MAX) { FUEL_MAX = used; std::cout << "FUEL " << S.type << " " << used << std::endl; }
+#else
+        if (!S.ready) init();
+        if (NET.base == NF) play<true>(); else play<false>();
+#endif
     } catch (const std::exception& e) {
         if (BOT_DEBUG) std::cout << "ERR " << e.what() << std::endl;
     }

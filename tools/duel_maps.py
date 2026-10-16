@@ -7,6 +7,8 @@ The duel bot's draft decodes these and picks accordingly (see bots/duel/src/draf
 
 Usage: .venv/Scripts/python tools/duel_maps.py --size 1 --out maps_duel/1v1
   writes <layout>__<a1>-<b1>.map26a for every ordered pair of the 11 picks (121 maps per layout).
+  --size 2 writes <layout>__<a1>+<a2>-<b1>+<b2>.map26a for all 55 x 55 team pairs (3025 per layout);
+  the default --out is maps_duel/<N>v<N>. Teams are sorted pick tuples (no duplicate hero in a team).
 """
 import argparse
 import itertools
@@ -51,30 +53,44 @@ def layout(name: str, n: int) -> mf.MapData:
     return m
 
 
+def make_map(lay: str, ta, tb) -> mf.MapData:
+    """One arena with team A's picks `ta` and team B's picks `tb` (draft indices) encoded in walls."""
+    m = layout(lay, len(ta))
+    encode_picks(m, 0, ta)
+    encode_picks(m, 1, tb)
+    for board in (m.wall,):
+        for y in (0, 1):
+            for x in range(W):
+                if board[y][x]:
+                    board[H - 1 - y][W - 1 - x] = 1
+    return m
+
+
+def map_name(lay: str, ta, tb) -> str:
+    return f"{lay}__{'+'.join(PICKS[p] for p in ta)}-{'+'.join(PICKS[p] for p in tb)}.map26a"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--size", type=int, default=1)
-    ap.add_argument("--out", default="maps_duel/1v1")
+    ap.add_argument("--out", default="")
     ap.add_argument("--layouts", default="open,pillars")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="write only this many random team pairings per layout (3v3+ has too many to list; "
+                         "tools/nvn.py also writes any missing map on demand)")
     a = ap.parse_args()
-    out = Path(a.out)
+    out = Path(a.out or f"maps_duel/{a.size}v{a.size}")
     out.mkdir(parents=True, exist_ok=True)
     n = 0
     teams = list(itertools.combinations(range(len(PICKS)), a.size))
+    pairs = [(ta, tb) for ta in teams for tb in teams]
+    if a.sample:
+        import random
+        pairs = random.Random(0).sample(pairs, min(a.sample, len(pairs)))
     for lay in a.layouts.split(","):
-        for ta in teams:
-            for tb in teams:
-                m = layout(lay, a.size)
-                encode_picks(m, 0, ta)
-                encode_picks(m, 1, tb)
-                for board in (m.wall,):
-                    for y in (0, 1):
-                        for x in range(W):
-                            if board[y][x]:
-                                board[H - 1 - y][W - 1 - x] = 1
-                name = f"{lay}__{'+'.join(PICKS[p] for p in ta)}-{'+'.join(PICKS[p] for p in tb)}.map26a"
-                mf.write(m, out / name)
-                n += 1
+        for ta, tb in pairs:
+            mf.write(make_map(lay, ta, tb), out / map_name(lay, ta, tb))
+            n += 1
     print(f"wrote {n} maps to {out}")
 
 

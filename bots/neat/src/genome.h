@@ -3,12 +3,14 @@
 // overwrites the payload in place (no recompile per genome).
 //
 // Layout (32-bit words; ints stored as uint32, floats as their IEEE bits):
-//   [0..1] magic 'NEAT' 'BLOB'   [2] capacity in words   [3] format version (1)
+//   [0..1] magic 'NEAT' 'BLOB'   [2] capacity in words   [3] format version (1 or 2)
 //   [4] resign round (0 = never; team A resigns at that round to end duels early)
 //   [5..16] word offset of the network program for champion_type 0..11 (0 = none -> linear prior)
 // Program at offset o:
 //   [n_evals] then per eval: [node_slot] [activation] [bias f] [response f] [k] then k x ([src_slot] [weight f])
 //   then [output_slot]. Slots 0..NF-1 are the option features; hidden/output nodes use NF and up.
+// Format 1 (NF_V1 = 25 features) is still accepted: its slots >= 25 are shifted up to NF on load, so a
+// 1v1 blob plays exactly as before (the new team-feature inputs are simply unconnected).
 // Activations: 0 identity, 1 tanh(2.5z), 2 sigmoid(5z), 3 relu (neat-python conventions).
 #include <cstdint>
 

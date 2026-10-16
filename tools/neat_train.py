@@ -11,6 +11,10 @@ generation 0 plays exactly like that run, and NEAT adds structure from there.
       [--opps 4] [--slots 8] [--jobs 4] [--resign 800]
   .venv/Scripts/python tools/neat_train.py export n1        # elite networks -> .arena/neat/n1/elites.json
 
+N-v-N stage (tools/nvn.py has the matchups, fitness credit and map lookup):
+  .venv/Scripts/python -u tools/neat_train.py run n2v2 --team-size 2 --warm-run n2 [--pop 12]
+      [--pairings 5] [--duels 2] [--slots 8] [--jobs 4] [--warm-arena <other .arena>]
+
 Structure control (Green, "Phased Searching with NEAT"): each population alternates between a
 complexifying phase (add/delete mutations) and a simplifying phase (deletions only). It switches to
 simplifying when mean complexity (nodes + enabled links) rises PHASE_RISE above the floor set at the
@@ -34,12 +38,14 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
 import duel_train  # noqa: E402
+import nvn  # noqa: E402
 
 import neat  # noqa: E402
 
 PICKS = duel_train.PICKS
 ROWS = duel_train.ROWS          # pick -> champion_type rows (C&I -> [3, 4])
-NF = 25
+NF = nvn.NF            # bot features (31); hidden/output program slots start here
+NF_V1 = nvn.NF_V1      # duel features (25): input count of 1v1 genomes
 MAX_NODES, MAX_LINKS, WORDS = 64, 160, 16384
 MAGIC = struct.pack("<II", 0x4E454154, 0x424C4F42)
 ACT = {"identity": 0, "tanh": 1, "sigmoid": 2, "relu": 3}
@@ -55,7 +61,7 @@ reset_on_extinction   = True
 no_fitness_termination = True
 
 [DefaultGenome]
-num_inputs              = {NF}
+num_inputs              = {{nin}}
 num_hidden              = 0
 num_outputs             = 1
 initial_connection      = full_direct
@@ -153,9 +159,9 @@ def update_phase(ph, pop):
     return ph
 
 
-def make_config(run_dir: Path, pop: int, tag: str = ""):
+def make_config(run_dir: Path, pop: int, tag: str = "", nin: int = NF_V1):
     path = run_dir / f"neat{tag}.cfg"
-    path.write_text(CONFIG.replace("{pop}", str(pop)))
+    path.write_text(CONFIG.replace("{pop}", str(pop)).replace("{nin}", str(nin)))
     return neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet,
                        neat.DefaultStagnation, str(path))
 
@@ -191,7 +197,7 @@ def _f(x):
 
 def blob(programs: dict, resign: int):
     """programs: champion_type -> program words."""
-    words = [0x4E454154, 0x424C4F42, WORDS, 1, resign] + [0] * 12
+    words = [0x4E454154, 0x424C4F42, WORDS, 2, resign] + [0] * 12   # format 2: NF-feature slots
     for t, prog in programs.items():
         words[5 + t] = len(words)
         words += prog
@@ -272,7 +278,7 @@ def seed_rows(seed_from, min_vs_prior=0.0):
     out = {}
     for p, rows in ROWS.items():
         use_learned = vs is None or vs[p] >= min_vs_prior
-        out[p] = np.mean([(learned if use_learned else prior)[r][:NF] for r in rows], axis=0)
+        out[p] = np.mean([(learned if use_learned else prior)[r][:NF_V1] for r in rows], axis=0)
         print(f"  seed {PICKS[p]:9} <- {'learned' if use_learned else 'prior'}"
               + (f" (vs prior {vs[p]:+.1f})" if vs else ""), flush=True)
     return out
@@ -286,10 +292,7 @@ def anchor_bot(slot_dir, resign):
 def champion_programs():
     """Current per-hero champion set (tools/champions.py), or None."""
     path = arena.ARENA / "champions" / "current.json"
-    if not path.exists():
-        return None
-    d = json.loads(path.read_text(encoding="utf-8"))
-    return {PICKS.index(h): w for h, w in d["programs"].items() if w}
+    return nvn.load_programs(path) if path.exists() else None
 
 
 def map_path(layout, a, b):
@@ -306,7 +309,81 @@ def seed_population(pop, config, row_weights, rng):
         out.bias, out.response, out.activation = 0.0, 1.0, "identity"
 
 
+def widen(pop, size):
+    """Warm start for N-v-N: give a 1v1 population the NF team-feature inputs (unconnected, so every
+    genome scores exactly as before) and cut it to `size` genomes, elites first."""
+    gc = pop.config.genome_config
+    gc.num_inputs = NF
+    gc.input_keys = [-i - 1 for i in range(NF)]
+    pop.config.pop_size = size
+    if len(pop.population) > size:
+        keep = sorted(pop.population.items(), key=lambda kv: -1e9 if kv[1].fitness is None else -kv[1].fitness)
+        pop.population = dict(keep[:size])
+    pop.species.speciate(pop.config, pop.population, pop.generation)
+
+
+def run_nvn(a):
+    """N-v-N stage (tools/nvn.py): the 1v1 populations of --warm-run, widened to the team features."""
+    n = a.team_size
+    d = OUT / a.name
+    d.mkdir(parents=True, exist_ok=True)
+    ck = d / "state.pkl"
+    warm = Path(a.warm_arena) if a.warm_arena else arena.ARENA
+    if ck.exists():
+        st = load_state(ck)
+        print(f"resuming {n}v{n} at generation {st['gen']}", flush=True)
+    else:
+        src = load_state(warm / "neat" / a.warm_run / "state.pkl")       # read-only
+        st = {"gen": 0, "pops": src["pops"], "elites": src["elites"], "phase": src["phase"], "team_size": n,
+              "warm": f"{warm / 'neat' / a.warm_run} gen {src['gen']}"}
+        for pop in st["pops"].values():
+            widen(pop, a.pop)
+        print(f"{n}v{n}: warm-started {len(st['pops'])} populations from {st['warm']}", flush=True)
+    assert st["team_size"] == n, f"run {a.name} is {st['team_size']}v{st['team_size']}"
+    slots = build_slots(a.slots + 2)
+    elite_slot, anchor = slots[0], anchor_bot(slots[1], a.resign)
+    cand_slots = slots[2:]
+    log = d / "log.jsonl"
+    for _ in range(a.gens):
+        t0 = time.perf_counter()
+        gen = st["gen"] + 1
+        champs = nvn.champion_set(n, warm)
+        team_progs = {q: champs.get(q) or program(st["elites"][q], st["pops"][q].config) for q in ROWS}
+        elite_bot = patch(elite_slot, nvn.team_blob(sys.modules[__name__], team_progs, a.resign), "elite")
+        summary = {}
+        for p, pop in st["pops"].items():
+            sched = nvn.schedule(n, gen, p, a.pairings, a.duels)
+
+            def evaluate(genomes, cfg, p=p, sched=sched):
+                items = list(genomes)
+                res = nvn.evaluate(sys.modules[__name__], [program(g, cfg) for _, g in items], p, sched,
+                                   team_progs, elite_bot, anchor, cand_slots, a)
+                for (_, g), (f, fn, f1) in zip(items, res):
+                    g.fitness = f - 0.002 * len(g.connections)
+                    g.f_split = (fn, f1)
+                best = max((g for _, g in items), key=lambda g: g.fitness)
+                st["elites"][p] = best
+                fn, f1 = best.f_split
+                summary[PICKS[p]] = [round(best.fitness, 2), fn and round(fn, 2), f1 and round(f1, 2),
+                                     len(best.nodes), len(best.connections)]
+
+            pop.run(evaluate, 1)
+            ph = update_phase(st["phase"][p], pop)
+            summary[PICKS[p]] += [ph["mode"][0], ph["mean_complexity"]]
+        st["gen"] = gen
+        save_state(ck, st)
+        secs = time.perf_counter() - t0
+        mean = lambda i: round(sum(v[i] for v in summary.values() if v[i] is not None) / len(summary), 3)  # noqa: E731
+        with log.open("a") as fh:
+            fh.write(json.dumps({"gen": gen, "team_size": n, "secs": round(secs), "mean_fit": mean(0),
+                                 f"mean_f{n}v{n}": mean(1), "mean_f1v1": mean(2), "best": summary}) + "\n")
+        print(f"gen {gen:4} {n}v{n} {secs:6.0f}s  fit {mean(0):+.2f}  {n}v{n} {mean(1):+.2f}  1v1 {mean(2):+.2f}  " +
+              " ".join(f"{k}:{v[1]:+.1f}/{v[2]:+.1f}/{v[3]}n{v[4]}c" for k, v in summary.items()), flush=True)
+
+
 def run(a):
+    if a.team_size > 1:
+        return run_nvn(a)
     d = OUT / a.name
     d.mkdir(parents=True, exist_ok=True)
     config = make_config(d, a.pop)
@@ -388,9 +465,10 @@ def run(a):
 def export(a):
     d = OUT / a.name
     st = load_state(d / "state.pkl")
-    config = make_config(d, 2)
-    out = {PICKS[p]: program(g, config) for p, g in st["elites"].items()}
-    (d / "elites.json").write_text(json.dumps({"gen": st["gen"], "programs": out}))
+    out = {PICKS[p]: program(g, st["pops"][p].config) for p, g in st["elites"].items()}
+    tmp = d / "elites.tmp"
+    tmp.write_text(json.dumps({"gen": st["gen"], "nf": NF, "team_size": st.get("team_size", 1), "programs": out}))
+    tmp.replace(d / "elites.json")
     print(f"gen {st['gen']}: wrote {d / 'elites.json'}")
 
 
@@ -403,6 +481,7 @@ def main():
     r.add_argument("--jobs", type=int, default=arena.DEFAULT_JOBS); r.add_argument("--resign", type=int, default=800)
     r.add_argument("--opp", choices=["champions", "own"], default="champions",
                    help="evolving opponents: the cross-method champion set (default) or this run's own elites")
+    nvn.add_args(r)
     e = sub.add_parser("export"); e.add_argument("name")
     a = ap.parse_args()
     {"run": run, "export": export}[a.cmd](a)

@@ -39,7 +39,7 @@ The C++ API source of truth locally is `sdk/cpp/cambc.h`.
 | Gem cluster | 500 | 0 | 0 | 0 | 24 | 50 |
 | Gold cluster | 500 | 0 | 0 | 35 | 0 | 50 |
 | Monolith | 20,000 | 200 | 3 | 300 | 200 | 150 |
-- Camp group = cardinally connected monsters. Passive until hit; then attacks the **nearest champion (either team)** each round until dead or it takes no damage for 2 turns (GameRules.md wording; verify in-engine). A camp kill gives no killer: the victim's carried gems are destroyed and nobody gets the 50 gold. Vision 8, sees through bushes, **does not chase**.
+- Camp group = cardinally connected monsters. Passive until hit; then attacks the **nearest champion (either team)** each round until dead or it goes back to sleep. GameRules.md contradicts itself on sleep ("does not take damage for 2 turns" vs "two rounds without an in-range champion"): **verify in-engine** before relying on camp-kill denial. Monster attack range 3. **Rewards come from the capture, not the last hit** (see Capture below). A camp kill gives no killer: the victim's carried gems are destroyed and nobody gets the 50 gold. Vision 8, sees through bushes, **does not chase**.
 - **Capture**: after the whole group dies, stand on one of its spawn tiles uncontested for a 5-round timer. Leaving or enemy presence resets it. Extra allies don't speed it up; rewards split among allies present (lowest ID gets remainder). Respawn uses the longest member cooldown; an occupied spawn tile delays respawn.
 - Gem clusters: 0 damage, 500 HP, 24 gems — free gems.
 

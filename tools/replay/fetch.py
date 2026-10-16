@@ -49,6 +49,26 @@ class Client:
     def bytes(self, path):
         return self._get(path)
 
+    def bundle(self, mid, max_wait=180):
+        """Replay bundle bytes. The platform prepares bundles on demand: the first request may return
+        {"status": "pending", "pollUrl": ..., "retryAfter": s} instead of a zip, so poll until it is ready."""
+        path, waited = f"/matches/{mid}/bundle", 0.0
+        while True:
+            data = self._get(path)
+            if data[:2] == b"PK":
+                return data
+            try:
+                info = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise RuntimeError(f"{mid}: unexpected bundle response ({len(data)} bytes)")
+            if info.get("status") != "pending" or waited >= max_wait:
+                raise RuntimeError(f"{mid}: bundle not available: {info}")
+            delay = min(30.0, float(info.get("retryAfter") or 5))
+            time.sleep(delay)
+            waited += delay
+            poll = info.get("pollUrl") or path
+            path = poll[len("/api/v1"):] if poll.startswith("/api/v1") else poll
+
 
 def team_groups(c, team, want):
     """Finished match groups for a team, newest first, until `want` matches are covered."""
@@ -67,8 +87,12 @@ def team_groups(c, team, want):
     return groups
 
 
-def sidecar(group, m):
-    sides = m.get("sides") or []
+def sidecar(detail, m):
+    """Official metadata for one match. Since mid-October 2026 the public API no longer includes
+    per-match `statistics` (they need a login), so `statistics` is usually null; validate.py then
+    checks decoded gems against the public final scores instead. Teams are ordered by side (a = A)."""
+    group = detail.get("group") or detail
+    sides = sorted(m.get("sides") or [], key=lambda s: s.get("side") or "")
     return {"matchId": m["id"], "groupId": group.get("id"), "map": m.get("map"), "rounds": m.get("rounds"),
             "createdAt": m.get("createdAt") or group.get("createdAt"), "status": m.get("status"),
             "teams": [s.get("teamName") for s in sides], "teamIds": [s.get("teamId") for s in sides],
@@ -83,7 +107,7 @@ def save_match(c, out, mid, meta=None):
     if z.exists():
         print(f"skip {mid} (have it)")
         return z
-    data = c.bytes(f"/matches/{mid}/bundle")
+    data = c.bundle(mid)
     tmp = z.with_suffix(".part")
     tmp.write_bytes(data)
     tmp.replace(z)

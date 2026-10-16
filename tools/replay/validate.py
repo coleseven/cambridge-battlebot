@@ -4,6 +4,8 @@ Usage: python tools/replay/validate.py <dir or files>... [--timelines DIR]
 
 For each bundle (.zip / .repl26a) it needs official statistics from either a platform sidecar
 (<stem>.meta.json from fetch.py) or a local `cambc run --statistics` file named <stem>.stats.json.
+The public platform API stopped publishing per-match statistics in mid-October 2026; for such
+sidecars only the final gems are checked against the public scores ("scores only").
 Compares per team: final submitted gems, kills (from kill events, C&I linked deaths count once),
 body deaths (from death events); per champion: banked gems, gems collected from camps, and
 champion damage dealt/taken. Prints one line per game and exits non-zero on any mismatch.
@@ -23,7 +25,12 @@ import metrics as M  # noqa: E402
 def stats_for(p):
     side = p.with_suffix(".meta.json")
     if side.exists():
-        return json.loads(side.read_text(encoding="utf-8")).get("statistics"), "platform"
+        meta = json.loads(side.read_text(encoding="utf-8"))
+        if meta.get("statistics"):
+            return meta["statistics"], "platform"
+        if all(isinstance(x, int) for x in meta.get("scores") or [None]):
+            return {"scores_only": meta["scores"]}, "platform-scores"   # public API: final scores only
+        return None, None
     st = p.with_suffix(".stats.json")
     if st.exists():
         return json.loads(st.read_text(encoding="utf-8")), "local"
@@ -55,6 +62,15 @@ def main():
             Path(a.timelines).mkdir(parents=True, exist_ok=True)
             (Path(a.timelines) / (f.stem + ".timeline.json")).write_text(out.stdout, encoding="utf-8")
         ev = E.derive(tl)
+        if "scores_only" in stats:
+            gems = E.team_totals(tl, ev)["gems"]
+            ok = list(gems) == list(stats["scores_only"])
+            n += 1
+            bad += 0 if ok else 1
+            teams = (tl["meta"].get("platform") or {}).get("teams") or ["A", "B"]
+            print(f"{'OK  ' if ok else 'BAD '}{f.name} [scores only] {teams[0]} vs {teams[1]} r{tl['meta']['rounds']} "
+                  f"gems decoded {gems[0]}/{gems[1]} official {stats['scores_only'][0]}/{stats['scores_only'][1]}")
+            continue
         ok, res = E.check_stats(tl, ev, stats)
         m = M.compute(tl, ev)
         diffs = []

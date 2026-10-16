@@ -92,7 +92,7 @@ def play(cambc: str, path: Path) -> list:
     with tempfile.TemporaryDirectory() as td:
         stats = Path(td) / "s.json"
         proc = subprocess.run([cambc, "run", "starter-cpp", "starter-cpp", "--map", str(path.resolve()),
-                               "--statistics", str(stats), "-o", td], cwd=ROOT, capture_output=True, text=True)
+                               "--statistics", str(stats), "--json", "-o", td], cwd=ROOT, capture_output=True, text=True)
         if proc.returncode != 0 or not stats.exists():
             return [f"game failed (exit {proc.returncode}): {(proc.stderr or proc.stdout).strip()[-300:]}"]
         s = json.loads(stats.read_text())

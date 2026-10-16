@@ -164,6 +164,8 @@ def all_maps(pool="maps"):
 
 
 def _summarise(stats: dict) -> dict:
+    if "match" in stats:                               # cambc >= 2.2 (`--statistics ... --json`)
+        return _summarise_v2(stats)
     t = stats["teams"]
     per = [{"kills": 0, "deaths": 0, "gold": 0, "dmg": 0.0, "taken": 0.0} for _ in range(2)]
     for c in stats["champions"]:
@@ -173,6 +175,25 @@ def _summarise(stats: dict) -> dict:
     return {"outcome": stats["outcome"], "round": stats["round"],
             "gems": [t[0]["submittedGems"], t[1]["submittedGems"]], "faults": stats["botFaults"],
             "drafts": [t[0]["draftPicks"], t[1]["draftPicks"]], "teams": per}
+
+
+def _summarise_v2(stats: dict) -> dict:
+    """cambc 2.2 JSON: teams are "teamA"/"teamB", integer metrics are strings, drafts are names."""
+    side = {"teamA": 0, "teamB": 1}
+    per = [{"kills": 0, "deaths": 0, "gold": 0, "dmg": 0.0, "taken": 0.0} for _ in range(2)]
+    for c in stats["champions"]:
+        p, m = per[side[c["team"]]], c["metrics"]
+        p["kills"] += int(m["kills"]); p["deaths"] += int(m["deaths"]); p["gold"] += int(m["earnedGold"])
+        p["dmg"] += float(m["championDamageDone"]); p["taken"] += float(m["championDamageTaken"])
+    gems = [0, 0]
+    for t in stats["teams"]:
+        gems[side[t["team"]]] = int(t["submittedGems"])
+    drafts = [[], []]
+    for d in stats["roster"]["draft"]:
+        drafts[side[d["team"]]].append(d["champion"])
+    bf = stats["diagnostics"]["botFaults"]
+    return {"outcome": stats["match"]["outcome"], "round": stats["match"]["roundsStarted"],
+            "gems": gems, "faults": [bf.get("teamA", 0), bf.get("teamB", 0)], "drafts": drafts, "teams": per}
 
 
 def play(a: Bot, b: Bot, map_path: Path, keep_replay: Path | None = None) -> dict:
@@ -186,7 +207,7 @@ def play(a: Bot, b: Bot, map_path: Path, keep_replay: Path | None = None) -> dic
         stats_file = out / "stats.json"
         for attempt in range(5):
             r = _run([CAMBC, "run", a.path, b.path, "--map", map_path, "-o", keep_replay or out,
-                      "--statistics", stats_file])
+                      "--statistics", stats_file, "--json"])
             # Parallel runs sharing a bot directory occasionally collide on a file rename (Windows).
             if stats_file.exists() or "failed to persist" not in r.stdout + r.stderr:
                 break

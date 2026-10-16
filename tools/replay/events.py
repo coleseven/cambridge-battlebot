@@ -300,10 +300,12 @@ def team_totals(tl, ev):
 def check_stats(tl, ev, stats):
     """Compare decoded totals with an official statistics JSON (cambc run --statistics / platform)."""
     tot = team_totals(tl, ev)
-    off_g = [t["submittedGems"] for t in sorted(stats["teams"], key=lambda t: t["team"])]
+    off_g = [int(t["submittedGems"]) for t in sorted(stats["teams"], key=lambda t: t["team"])]
     off_k, off_d = [0, 0], [0, 0]
     for c in stats["champions"]:
-        off_k[c["team"]] += c["kills"]; off_d[c["team"]] += c["deaths"]
+        m = c.get("metrics", c)                            # cambc >= 2.2 JSON nests string metrics
+        side = {"teamA": 0, "teamB": 1}.get(c["team"], c["team"])
+        off_k[side] += int(m["kills"]); off_d[side] += int(m["deaths"])
     res = {"gems": (tot["gems"], off_g), "kills": (tot["event_kills"], off_k), "deaths": (tot["event_deaths"], off_d)}
     ok = all(list(a) == list(b) for a, b in res.values())
     return ok, res
@@ -319,7 +321,7 @@ def main():
     ev = derive(tl)
     rc = 0
     if a.check_stats or (tl["meta"].get("platform") or {}).get("statistics"):
-        stats = json.loads(Path(a.check_stats).read_text()) if a.check_stats else tl["meta"]["platform"]["statistics"]
+        stats = json.loads(Path(a.check_stats).read_text(encoding="utf-8")) if a.check_stats else tl["meta"]["platform"]["statistics"]
         ok, res = check_stats(tl, ev, stats)
         print(("OK  " if ok else "MISMATCH ") + " ".join(f"{k} decoded={v[0]} official={v[1]}" for k, v in res.items()), file=sys.stderr)
         if not ok:

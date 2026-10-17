@@ -81,8 +81,20 @@ The worker, transport and adopt-base all work (the worker ran ~10k games/h whene
 - Optionally the coordinator holds back its own claims while live remote workers have spare capacity.
 - Re-run the 1b success test afterwards.
 
-The "CAMBC night worker" scheduled task (`tools/night_worker.cmd`, daily 00:00, path quoting fixed on
-17 Oct) is **disabled** until this lands. Re-enable with `Enable-ScheduledTask -TaskName 'CAMBC night worker'`.
+**Fixed and measured (17 Oct afternoon, PRs #6–#8):** whole-generation batches, a throughput-weighted
+local share, and the coordinator claiming from the opposite end of the queue to the workers.
+- Live 2v2 NEAT generations with both PCs: **504–602 s vs ~950 s solo (1.65–1.9×)**.
+- The main PC played ~55–60% of the games.
+- Duplicate games fell from 1,723 to ~230–490 per generation (~10%).
+
+**Throughput reality check:** per thread the training PC is faster on these games (~2,800 games/h/thread)
+than the main PC at 12 jobs (~1,700/h/thread, CPU at 100%). The main PC is therefore ~1.8× the training
+PC, not 4–5×, and the two-PC ceiling is ~2.8× solo. Remaining losses: duplicates where both ends of the
+queue meet, and the sync delay at each generation's end. Weigh this in the 1c scaling test and any
+compute-buying decision.
+
+The "CAMBC night worker" scheduled task (`tools/night_worker.cmd`, daily 00:00, `--adopt-base`, stops by
+12:00) is **enabled** again.
 
 ### 1c. Scaling test (gate for buying compute)
 - Same setup, same wall-clock time: 1× (training PC only) vs ~5× (both machines). Compare league

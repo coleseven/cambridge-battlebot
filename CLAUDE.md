@@ -10,6 +10,9 @@ Site: https://2026a.battlecode.co.uk/game/home · Rules summary: `docs/GAME_NOTE
   `.arena/results.jsonl` keyed by (cambc version, wasm hash A, wasm hash B, map hash). Deterministic engine → never replays.
 - `tools/eval.py` — one bot vs an opponent pool, all maps, both seats, plus fitness.
 - `tools/tune.py` — CMA-ES over `src/params.h` numbers (`prepare` / `run` / `best`; runs live in `.arena/runs/<name>/`).
+- `tools/dist.py`, `dist_worker.py` — distributed game evaluation: the trainer queues batches in a shared folder,
+  workers on any machine play them (`--dist <folder>` on the N-v-N trainers, league, champions; off by default).
+  See `docs/DIST_WORKERS.md`.
 - `tools/scout.py` — public ladder/match statistics scraper (`scouting/`).
 - `tools/mapformat.py`, `mapstats.py`, `mapgen.py`, `validate_maps.py` — `.map26a` codec, map features, generator,
   validator (format: `docs/MAP_FORMAT.md`). `maps_gen/` — 40 generated held-out maps (use with the tuner's `--maps`).

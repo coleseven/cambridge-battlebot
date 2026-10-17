@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
+import dist  # noqa: E402
 import duel_train  # noqa: E402
 import league  # noqa: E402
 import neat_train as nt  # noqa: E402
@@ -44,6 +45,7 @@ def main():
     ap.add_argument("--resign", type=int, default=800)
     ap.add_argument("--team-size", type=int, default=1)
     ap.add_argument("--pairings", type=int, default=6, help="N > 1: sampled team pairings per hero")
+    dist.add_arg(ap)
     a = ap.parse_args()
     n = a.team_size
     specs = {"neat": f"neat:{a.neat}", "cgp": f"cgp:{a.cgp}"}
@@ -64,7 +66,7 @@ def main():
                     games.append((bots["neat"], bots["cgp"], nt.map_path(lay, p, q))); meta.append(({p}, 0))
                     games.append((bots["cgp"], bots["neat"], nt.map_path(lay, q, p))); meta.append(({p}, 1))
     t0 = time.perf_counter()
-    res = arena.play_many(games, a.jobs)
+    res = dist.play_many(games, a.jobs, root=a.dist)
     score = {p: [] for p in range(len(PICKS))}
     for (heroes, seat), r in zip(meta, res):
         for p in heroes:

@@ -352,13 +352,26 @@ def run_nvn(a):
         team_progs = {q: champs.get(q) or program(st["elites"][q], st["pops"][q].config) for q in ROWS}
         elite_bot = patch(elite_slot, nvn.team_blob(sys.modules[__name__], team_progs, a.resign), "elite")
         summary = {}
+        scheds = {p: nvn.schedule(n, gen, p, a.pairings, a.duels) for p in st["pops"]}
+        pre = {}
+        if not a.per_hero:
+            # Whole generation in one batch: every hero's genomes, in the order pop.run will pass them.
+            # Evaluation uses no shared randomness, so this equals the per-hero path game for game.
+            items_of = {p: list(pop.population.items()) for p, pop in st["pops"].items()}
+            res = nvn.evaluate_many(sys.modules[__name__],
+                                    [(p, [program(g, st["pops"][p].config) for _, g in items_of[p]], scheds[p])
+                                     for p in st["pops"]], team_progs, elite_bot, anchor, cand_slots, a)
+            pre = {p: {gid: r for (gid, _), r in zip(items_of[p], res[p])} for p in st["pops"]}
         for p, pop in st["pops"].items():
-            sched = nvn.schedule(n, gen, p, a.pairings, a.duels)
+            sched = scheds[p]
 
             def evaluate(genomes, cfg, p=p, sched=sched):
                 items = list(genomes)
-                res = nvn.evaluate(sys.modules[__name__], [program(g, cfg) for _, g in items], p, sched,
-                                   team_progs, elite_bot, anchor, cand_slots, a)
+                if pre:
+                    res = [pre[p][gid] for gid, _ in items]
+                else:
+                    res = nvn.evaluate(sys.modules[__name__], [program(g, cfg) for _, g in items], p, sched,
+                                       team_progs, elite_bot, anchor, cand_slots, a)
                 for (_, g), (f, fn, f1) in zip(items, res):
                     g.fitness = f - 0.002 * len(g.connections)
                     g.f_split = (fn, f1)

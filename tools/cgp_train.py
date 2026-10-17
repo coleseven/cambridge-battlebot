@@ -204,14 +204,24 @@ def run_nvn(a):
         team_progs = {q: champs.get(q) or program(st["elite"][q]) for q in ROWS}
         elite_bot = nt.patch(elite_slot, nvn.team_blob(nt, team_progs, a.resign), "elite")
         summary = {}
-        for p, islands in st["islands"].items():
-            sched = nvn.schedule(n, gen, p, a.pairings, a.duels, seed=1)
+        scheds, cands_of = {}, {}
+        for p, islands in st["islands"].items():         # mutate every hero first: same rng order as before
+            scheds[p] = nvn.schedule(n, gen, p, a.pairings, a.duels, seed=1)
             cands = []                                   # (island, genome); parent first per island
             for i, isl in enumerate(islands):
                 cands.append((i, isl["g"]))
                 cands += [(i, mutate(isl["g"], rng)) for _ in range(a.lam)]
-            res = nvn.evaluate(nt, [program(g) for _, g in cands], p, sched, team_progs, elite_bot, anchor,
-                               cand_slots, a)
+            cands_of[p] = cands
+        if not a.per_hero:                               # whole generation in one batch
+            batch = nvn.evaluate_many(nt, [(p, [program(g) for _, g in cands_of[p]], scheds[p])
+                                           for p in st["islands"]], team_progs, elite_bot, anchor, cand_slots, a)
+        for p, islands in st["islands"].items():
+            sched, cands = scheds[p], cands_of[p]
+            if a.per_hero:
+                res = nvn.evaluate(nt, [program(g) for _, g in cands], p, sched, team_progs, elite_bot, anchor,
+                                   cand_slots, a)
+            else:
+                res = batch[p]
             fits = [f - 0.002 * n_links(g) for (f, _, _), (_, g) in zip(res, cands)]
             split = {}
             for i, isl in enumerate(islands):

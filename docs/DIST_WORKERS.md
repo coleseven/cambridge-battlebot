@@ -12,7 +12,7 @@ Distribution is **off unless asked for**. Without `--dist` (or the env var `BC_D
 ## Design
 
 - **Drop-in.** `dist.play_many(games, jobs, progress, root)` takes and returns the same things as
-  `arena.play_many`. `nvn.evaluate` (both trainers' N-v-N stage), `tools/league.py` and
+  `arena.play_many`. `nvn.evaluate_many` / `nvn.evaluate` (both trainers' N-v-N stage), `tools/league.py` and
   `tools/champions.py` call it and take `--dist <folder>`. The 1v1 trainer loops and `duel_train` still
   call `arena.play_many` directly.
 - **What a task carries.** The game keys plus everything needed to rebuild each bot exactly:
@@ -36,8 +36,22 @@ Distribution is **off unless asked for**. Without `--dist` (or the env var `BC_D
   can't be shipped and claim queued tasks like any worker, using the caller's own Bot objects, so they
   play exactly the games `arena.play_many` would. With no remote worker the local threads play
   everything: same results, plus a few small JSON files.
+- **Whole-generation batches (17 Oct).** The first cross-PC test gave no speed-up (0.90×). `nvn.evaluate`
+  played each generation as 33 small calls (11 heroes × groups of 8 candidates, ~200 games, 20–30 s each),
+  and a Syncthing round trip takes 20–40 s, so remote results arrived after the coordinator had played or
+  replayed the games itself (28 remote games used, 272 wasted). Now:
+  - both trainers' N-v-N stage calls `nvn.evaluate_many` once per generation (all heroes, ~3–4k games);
+  - candidates are **`dist.BlobBot`s**: base id + genome blob, hash computed in memory, no slot of their
+    own;
+  - `dist.play_slots(games, jobs, slots, root)` plays them. Local thread i uses its own pair of slots and
+    writes only the 64 KB genome block in place (skipped when the slot already holds that bot). With a
+    root, the coordinator's threads do this as its local share, and remote workers materialise the same
+    blobs as before.
+  - Same games, same order of random draws: a generation's fitness and resulting population are identical
+    to the old path (`tools/batch_equiv.py`). `--per-hero` keeps the old path as a fallback.
 - **Tail.** When the queue is empty, idle local threads replay a task a remote worker has held for longer
-  than 2× the median task time (at least 5 s; 30 s before any task has finished). A slow or vanished
+  than 2× the median task time (at least **90 s**, `BC_DIST_MIN_STEAL`; one Syncthing round trip must fit
+  inside it; 30 s before any task has finished). A slow or vanished
   worker therefore can't hold a generation hostage. The first result to arrive wins; both are identical.
 - **Idempotent.** The engine is deterministic and tasks are content-addressed. A task played twice (reaped
   lease, restart, sync race) gives identical results, and the duplicate is ignored. Results are also
@@ -144,6 +158,10 @@ Several coordinators can share one root as long as their names differ (`BC_DIST_
 name). Each one ingests only its own results.
 
 ## Failure handling
+
+- Windows: a queue file another thread or process has open can't be deleted (PermissionError). All deletions
+  go through `dist.rm`, which tolerates this; a later pass removes the leftover. Before 17 Oct this could
+  crash the coordinator's reaper mid-generation.
 
 | Failure | What happens |
 |---|---|

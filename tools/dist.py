@@ -41,7 +41,11 @@ BATCH = int(os.environ.get("BC_DIST_BATCH", "4"))
 LEASE = float(os.environ.get("BC_DIST_LEASE", "120"))
 # Idle local threads replay a remote claim only after this long (and 2x the median task time). It must exceed
 # one Syncthing round trip (task out + result back, ~20-40 s), or remote results arrive after the replay.
-MIN_STEAL = float(os.environ.get("BC_DIST_MIN_STEAL", "90"))    # s without a heartbeat change -> worker dead
+MIN_STEAL = float(os.environ.get("BC_DIST_MIN_STEAL", "90"))
+# While a remote worker is alive, the coordinator's threads take a shipped task only after it has sat unclaimed
+# this long: claims are not exclusive across machines (a claim takes a Syncthing sync to be seen), so taking
+# fresh tasks there made both machines play the same games (17 Oct: 1,723 of 3,696 games wasted).
+SHARE_WAIT = float(os.environ.get("BC_DIST_SHARE_WAIT", "60"))    # s without a heartbeat change -> worker dead
 MAX_CLAIM = float(os.environ.get("BC_DIST_MAX_CLAIM", "3600"))   # s a claim may last whatever the heartbeat
 MAGIC = struct.pack("<II", 0x4E454154, 0x424C4F42)
 REGION = 16384 * 4                    # bytes of the genome block (bots/neat/src/genome.h GENOME_WORDS)
@@ -552,7 +556,32 @@ class Coordinator:
         self.reaper = Reaper(self.root, lease=lease)
         self.hb = Heartbeat(self.root, self.worker, role="coordinator", cambc=arena.cambc_version())
         self.task_secs = []     # durations of finished tasks (remote and local), for the steal threshold
+        self.created = {}       # task id -> time.time() it was queued (this process's clock)
+        self.speed_file = self.root / f"speeds-{self.name}.json"
+        self.speeds = read_json(self.speed_file) or {}   # worker -> recent per-thread games/s samples
         self.reset_stats()
+
+    # ------------------------------------------------------------ throughput split
+    def note_speed(self, worker: str, games: int, secs: float):
+        if games > 0 and secs > 0:
+            self.speeds[worker] = (self.speeds.get(worker, []) + [games / secs])[-60:]
+
+    def per_thread(self, worker: str) -> float:
+        v = sorted(self.speeds.get(worker, []))
+        if v:
+            return v[len(v) // 2]
+        every = sorted(x for xs in self.speeds.values() for x in xs)
+        return every[len(every) // 2] if every else 1.0
+
+    def remotes(self):
+        return [h for h in live_workers(self.root)
+                if h.get("name") != self.worker and h.get("role") != "coordinator" and h.get("state") != "draining"]
+
+    def local_share(self, jobs: int, remotes) -> float:
+        """Fraction of a call's shipped tasks the coordinator keeps, by measured throughput."""
+        mine = jobs * self.per_thread(self.worker)
+        theirs = sum(max(1, int(h.get("jobs") or 1)) * self.per_thread(h["name"]) for h in remotes)
+        return mine / (mine + theirs) if theirs > 0 else 1.0
 
     def reset_stats(self):
         """Counters since the last take_stats() (one trainer generation): distinct games by where their result
@@ -571,6 +600,8 @@ class Coordinator:
             if r.get("secs") is not None:
                 self.task_secs = (self.task_secs + [float(r["secs"])])[-200:]
             remote = r.get("worker") != self.worker
+            if remote and r.get("secs"):
+                self.note_speed(r.get("worker", "?"), len(r.get("results", {})), float(r["secs"]))
             for key, res in r.get("results", {}).items():
                 got[key] = res
                 if remote:
@@ -631,9 +662,22 @@ class Coordinator:
         self.ingest()
         self.tidy()
         tasks = self.make_tasks(games, keys)
+        remotes = self.remotes()
+        kept = []
+        if remotes and tasks:
+            # Keep our throughput share as plain local games (never queued), spread over the call's tasks.
+            f = self.local_share(jobs, remotes)
+            n_keep = min(len(tasks), round(f * len(tasks)))
+            if n_keep:
+                step = len(tasks) / n_keep
+                idx = {int(j * step) for j in range(n_keep)}
+                kept = [t for j, t in enumerate(tasks) if j in idx]
+                tasks = [t for j, t in enumerate(tasks) if j not in idx]
+            self.stats["kept_share"] = round(f, 3)
         mine = {t["id"]: t for t in tasks}
         for t in tasks:
-            submit(self.root, t)
+            if submit(self.root, t):
+                self.created[t["id"]] = time.time()
         shipped = {g["key"] for t in tasks for g in t["games"]}
         lock = threading.Lock()
         done = {}                                    # key -> result (without a/b names)
@@ -650,7 +694,11 @@ class Coordinator:
                     return
                 busy.add(k)
             try:
+                t_game = time.time()
                 r = player.play(*by_key[k], i) if player is not None else arena.play(*by_key[k])
+                if not r.get("cached"):
+                    with lock:
+                        self.note_speed(self.worker, 1, time.time() - t_game)
             except BaseException as e:      # surface it in the caller, like arena.play_many would
                 with lock:
                     busy.discard(k)
@@ -666,8 +714,19 @@ class Coordinator:
             if not r.get("cached"):
                 self.hb.add(games=1)
 
+        alive = {"t": 0.0, "v": bool(remotes)}
+
+        def remote_alive():
+            if time.time() - alive["t"] > 2.0:
+                alive["t"], alive["v"] = time.time(), bool(self.remotes())
+            return alive["v"]
+
         def accept(t):
-            return t["id"] in mine
+            if t["id"] not in mine:
+                return False
+            if not remote_alive():
+                return True
+            return time.time() - self.created.get(t["id"], 0.0) > SHARE_WAIT   # unclaimed for a while
 
         def worker_loop(i):
             while not stop.is_set():
@@ -734,6 +793,10 @@ class Coordinator:
             # Final sweep: results our own threads wrote after the loop's last ingest (seen on Windows,
             # where play_many returned with its local tasks' results/<id>.json still on disk).
             self.ingest()
+            try:
+                write_json(self.speed_file, self.speeds)
+            except OSError:
+                pass
             self.hb.beat(state="idle")
         self.last = {s: sum(v == s for v in src.values()) for s in ("cached", "local", "remote")}
         for s_, n_ in self.last.items():

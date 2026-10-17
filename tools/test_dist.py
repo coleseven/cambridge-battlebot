@@ -697,5 +697,68 @@ class BatchCoordinator(EngineCase):
         self.assertGreaterEqual(dist.Coordinator(self.root).min_steal, 60)
 
 
+class ThroughputSplit(EngineCase):
+    """While a remote worker is alive the coordinator keeps a throughput share local and leaves shipped tasks
+    to remotes (claims are not exclusive across machines), so no game is played on both."""
+
+    def start_remote(self, name, **kw):
+        dist.ensure(self.root)
+        stop = threading.Event()
+        th = threading.Thread(target=self.remote_worker, args=(name, stop), kwargs=kw, daemon=True)
+        th.start()
+        for _ in range(200):                       # wait until its heartbeat is visible
+            if (self.root / "workers" / f"{name}.json").exists():
+                break
+            time.sleep(0.01)
+        return stop, th
+
+    def test_no_game_played_twice_with_a_live_remote(self):
+        want = self.local()
+        stop, th = self.start_remote("w0")
+        try:
+            c = dist.coordinator(self.root)
+            got = c.play_many(self.games, 2)
+        finally:
+            stop.set()
+            th.join()
+        self.assertEqual(self.norm(got), self.norm(want))
+        self.assertEqual(len(self.played), len(set(self.played)))      # nothing played twice locally
+        self.assertEqual(c.stats["dup"], 0)                             # and nothing played on both sides
+        self.assertGreater(c.stats["by_worker"].get("w0", 0), 0)        # the remote got its share
+        self.assertIn("kept_share", c.stats)
+
+    def test_local_share_follows_measured_speed(self):
+        c = dist.Coordinator(self.root)
+        c.speeds = {c.worker: [1.0] * 5, "w0": [3.0] * 5}
+        remotes = [{"name": "w0", "jobs": 12}]
+        self.assertAlmostEqual(c.local_share(4, remotes), 4 / (4 + 36))
+        self.assertEqual(c.local_share(4, []), 1.0)
+        c.speeds = {}
+        self.assertAlmostEqual(c.local_share(4, remotes), 4 / 16)        # no data yet: per-thread equal
+
+    def test_unclaimed_tasks_are_taken_after_the_wait(self):
+        """A remote that beats but never claims (refusing every task) must not stall the call."""
+        want = self.local()
+        dist.ensure(self.root)
+        stop = threading.Event()
+
+        def idle_remote():
+            hb = dist.Heartbeat(self.root, "lazy", jobs=8)
+            while not stop.is_set():
+                hb.beat(state="idle")
+                time.sleep(0.05)
+        th = threading.Thread(target=idle_remote, daemon=True)
+        th.start()
+        while not (self.root / "workers" / "lazy.json").exists():
+            time.sleep(0.01)
+        try:
+            with mock.patch.object(dist, "SHARE_WAIT", 0.3):
+                got = dist.coordinator(self.root).play_many(self.games, 2)
+        finally:
+            stop.set()
+            th.join()
+        self.assertEqual(self.norm(got), self.norm(want))
+
+
 if __name__ == "__main__":
     unittest.main()

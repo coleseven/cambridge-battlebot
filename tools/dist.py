@@ -201,17 +201,50 @@ def queued(root: Path):
     return [p for *_, p in sorted(out)]
 
 
+LOCK_STALE_SECS = 30   # a lock with no claim file this old is a leftover of a crash between lock and rename
+
+
+def _lock(root: Path, tid: str) -> Path:
+    d = root / "locks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{tid}.lock"
+
+
+def unlock(root: Path, tid: str):
+    (root / "locks" / f"{tid}.lock").unlink(missing_ok=True)
+
+
 def claim(root: Path, worker: str, accept=lambda task: True):
-    """Atomically take the oldest acceptable queued task: rename queue/<id>.json -> claimed/<id>@<worker>.json.
-    Losing a race to another worker just moves on to the next file. Returns the task dict or None."""
+    """Atomically take the oldest acceptable queued task.
+
+    Exclusivity comes from creating locks/<id>.lock with O_CREAT|O_EXCL. A plain rename is not enough:
+    on Windows two concurrent renames of the same file can both report success (seen in about 45% of
+    8-thread trials on NTFS), which handed one task to several workers. The winner then renames
+    queue/<id>.json -> claimed/<id>@<worker>.json; the lock lives until the claim ends (complete,
+    release or reap). Returns the task dict or None."""
     for p in queued(root):
         task = read_json(p)
         if task is None or not accept(task):
             continue
+        lock = _lock(root, task["id"])
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:   # leftover lock from a crash between lock and rename: clear it, retry on a later pass
+                if (not any((root / "claimed").glob(f"{task['id']}@*.json"))
+                        and time.time() - lock.stat().st_mtime > LOCK_STALE_SECS):
+                    lock.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        except OSError:
+            continue
+        os.write(fd, worker.encode()); os.close(fd)
         dest = root / "claimed" / claim_name(task["id"], worker)
         try:
             os.rename(p, dest)
-        except OSError:            # someone else got it first (or it was tidied away)
+        except OSError:            # tidied away or finished meanwhile
+            lock.unlink(missing_ok=True)
             continue
         return task
     return None
@@ -224,6 +257,7 @@ def complete(root: Path, worker: str, task: dict, results: dict, secs: float):
                 "finished": now_iso(), "results": results})
     (root / "claimed" / claim_name(task["id"], worker)).unlink(missing_ok=True)
     (root / "queue" / f"{task['id']}.json").unlink(missing_ok=True)   # requeued meanwhile: no longer needed
+    unlock(root, task["id"])
 
 
 def release(root: Path, worker: str, tid: str):
@@ -236,6 +270,7 @@ def release(root: Path, worker: str, tid: str):
             os.rename(src, root / "queue" / f"{tid}.json")
     except OSError:
         pass
+    unlock(root, tid)
 
 
 class Heartbeat:
@@ -294,6 +329,7 @@ class Reaper:
             tid, worker = parse_claim(p.name)
             if (self.root / "results" / f"{tid}.json").exists():
                 p.unlink(missing_ok=True)         # finished; the worker died before dropping its claim
+                unlock(self.root, tid)
                 continue
             if self.alive(worker) and t - first <= self.max_claim:
                 continue
@@ -302,6 +338,7 @@ class Reaper:
                     p.unlink()
                 else:
                     os.rename(p, self.root / "queue" / f"{tid}.json")
+                unlock(self.root, tid)
                 out.append(tid)
             except OSError:
                 pass

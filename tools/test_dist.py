@@ -727,6 +727,16 @@ class ThroughputSplit(EngineCase):
         self.assertGreater(c.stats["by_worker"].get("w0", 0), 0)        # the remote got its share
         self.assertIn("kept_share", c.stats)
 
+    def test_coordinator_claims_from_the_other_end(self):
+        dist.ensure(self.root)
+        for i in range(5):
+            dist.submit(self.root, task(f"t{i}"))
+            os.utime(self.root / "queue" / f"t{i}.json", (1000 + i, 1000 + i))
+        self.assertEqual(dist.claim(self.root, "remote")["id"], "t0")
+        self.assertEqual(dist.claim(self.root, "coord", newest_first=True)["id"], "t4")
+        self.assertEqual(dist.claim(self.root, "remote")["id"], "t1")
+        self.assertEqual(dist.claim(self.root, "coord", newest_first=True)["id"], "t3")
+
     def test_local_share_follows_measured_speed(self):
         c = dist.Coordinator(self.root)
         c.speeds = {c.worker: [1.0] * 5, "w0": [3.0] * 5}
@@ -736,7 +746,7 @@ class ThroughputSplit(EngineCase):
         c.speeds = {}
         self.assertAlmostEqual(c.local_share(4, remotes), 4 / 16)        # no data yet: per-thread equal
 
-    def test_unclaimed_tasks_are_taken_after_the_wait(self):
+    def test_remote_that_never_claims_does_not_stall(self):
         """A remote that beats but never claims (refusing every task) must not stall the call."""
         want = self.local()
         dist.ensure(self.root)
@@ -752,8 +762,7 @@ class ThroughputSplit(EngineCase):
         while not (self.root / "workers" / "lazy.json").exists():
             time.sleep(0.01)
         try:
-            with mock.patch.object(dist, "SHARE_WAIT", 0.3):
-                got = dist.coordinator(self.root).play_many(self.games, 2)
+            got = dist.coordinator(self.root).play_many(self.games, 2)
         finally:
             stop.set()
             th.join()

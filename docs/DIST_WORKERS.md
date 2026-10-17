@@ -49,6 +49,17 @@ Distribution is **off unless asked for**. Without `--dist` (or the env var `BC_D
     blobs as before.
   - Same games, same order of random draws: a generation's fitness and resulting population are identical
     to the old path (`tools/batch_equiv.py`). `--per-hero` keeps the old path as a fallback.
+- **Throughput split (17 Oct, second live test).** With whole-generation batches the night PC played 85% of
+  the first generation (314 s vs ~950 s solo), but in the next generation both machines claimed the same
+  fresh tasks (claims are only exclusive on one machine; a claim takes a Syncthing sync to be seen):
+  1,723 of 3,696 games wasted. Now, while a remote worker is alive:
+  - the coordinator keeps its **throughput share** of each call as plain local games (never queued),
+    sized by measured per-thread speed × jobs. Speeds come from finished tasks and are saved in
+    `speeds-<coordinator>.json`, so later trainer steps start from them;
+  - its threads take a shipped task only once it has sat unclaimed for `BC_DIST_SHARE_WAIT` (60 s), or
+    via the tail rescue;
+  - with no live remote worker, everything is local as before. A remote that dies is still counted alive
+    for up to the 120 s lease, so the coordinator may wait up to 60 s before taking its unclaimed tasks.
 - **Tail.** When the queue is empty, idle local threads replay a task a remote worker has held for longer
   than 2× the median task time (at least **90 s**, `BC_DIST_MIN_STEAL`; one Syncthing round trip must fit
   inside it; 30 s before any task has finished). A slow or vanished

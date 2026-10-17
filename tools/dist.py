@@ -38,14 +38,14 @@ import arena
 
 ENV = "BC_DIST"                       # root folder; set (or pass --dist) to switch distribution on
 BATCH = int(os.environ.get("BC_DIST_BATCH", "4"))
-LEASE = float(os.environ.get("BC_DIST_LEASE", "120"))
+LEASE = float(os.environ.get("BC_DIST_LEASE", "120"))    # s without a heartbeat change -> worker dead
 # Idle local threads replay a remote claim only after this long (and 2x the median task time). It must exceed
 # one Syncthing round trip (task out + result back, ~20-40 s), or remote results arrive after the replay.
 MIN_STEAL = float(os.environ.get("BC_DIST_MIN_STEAL", "90"))
-# While a remote worker is alive, the coordinator's threads take a shipped task only after it has sat unclaimed
-# this long: claims are not exclusive across machines (a claim takes a Syncthing sync to be seen), so taking
-# fresh tasks there made both machines play the same games (17 Oct: 1,723 of 3,696 games wasted).
-SHARE_WAIT = float(os.environ.get("BC_DIST_SHARE_WAIT", "60"))    # s without a heartbeat change -> worker dead
+# Claims are exclusive on one machine only (a claim needs a Syncthing sync to be seen elsewhere). While a remote
+# worker is alive the coordinator therefore claims from the NEWEST end of the queue and workers from the oldest,
+# so the two can only collide where they meet at the end (17 Oct: shared fresh claims wasted 1,723 of 3,696
+# games; a 60 s "unclaimed for a while" rule still wasted 805, as big batches sit queued for minutes).
 MAX_CLAIM = float(os.environ.get("BC_DIST_MAX_CLAIM", "3600"))   # s a claim may last whatever the heartbeat
 MAGIC = struct.pack("<II", 0x4E454154, 0x424C4F42)
 REGION = 16384 * 4                    # bytes of the genome block (bots/neat/src/genome.h GENOME_WORDS)
@@ -345,15 +345,15 @@ def submit(root: Path, task: dict) -> bool:
     return True
 
 
-def queued(root: Path):
-    """Queue files, oldest first."""
+def queued(root: Path, newest_first: bool = False):
+    """Queue files, oldest first (newest first for a coordinator sharing the queue with remote workers)."""
     out = []
     for p in (root / "queue").glob("*.json"):
         try:
             out.append((p.stat().st_mtime, p.name, p))
         except OSError:
             pass
-    return [p for *_, p in sorted(out)]
+    return [p for *_, p in sorted(out, reverse=newest_first)]
 
 
 LOCK_STALE_SECS = 30   # a lock with no claim file this old is a leftover of a crash between lock and rename
@@ -369,7 +369,7 @@ def unlock(root: Path, tid: str):
     rm((root / "locks" / f"{tid}.lock"))
 
 
-def claim(root: Path, worker: str, accept=lambda task: True):
+def claim(root: Path, worker: str, accept=lambda task: True, newest_first: bool = False):
     """Atomically take the oldest acceptable queued task.
 
     Exclusivity comes from creating locks/<id>.lock with O_CREAT|O_EXCL. A plain rename is not enough:
@@ -377,7 +377,7 @@ def claim(root: Path, worker: str, accept=lambda task: True):
     8-thread trials on NTFS), which handed one task to several workers. The winner then renames
     queue/<id>.json -> claimed/<id>@<worker>.json; the lock lives until the claim ends (complete,
     release or reap). Returns the task dict or None."""
-    for p in queued(root):
+    for p in queued(root, newest_first):
         task = read_json(p)
         if task is None or not accept(task):
             continue
@@ -722,11 +722,7 @@ class Coordinator:
             return alive["v"]
 
         def accept(t):
-            if t["id"] not in mine:
-                return False
-            if not remote_alive():
-                return True
-            return time.time() - self.created.get(t["id"], 0.0) > SHARE_WAIT   # unclaimed for a while
+            return t["id"] in mine
 
         def worker_loop(i):
             while not stop.is_set():
@@ -735,7 +731,7 @@ class Coordinator:
                 if k is not None:
                     play_local(k, i)
                     continue
-                t = claim(self.root, self.worker, accept)
+                t = claim(self.root, self.worker, accept, newest_first=remote_alive())
                 if t is None:
                     t = self._steal(mine, done, busy, lock)    # tail: replay a task a remote holds
                 if t is None:

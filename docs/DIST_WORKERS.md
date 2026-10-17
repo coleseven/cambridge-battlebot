@@ -56,10 +56,11 @@ Distribution is **off unless asked for**. Without `--dist` (or the env var `BC_D
   - the coordinator keeps its **throughput share** of each call as plain local games (never queued),
     sized by measured per-thread speed × jobs. Speeds come from finished tasks and are saved in
     `speeds-<coordinator>.json`, so later trainer steps start from them;
-  - its threads take a shipped task only once it has sat unclaimed for `BC_DIST_SHARE_WAIT` (60 s), or
-    via the tail rescue;
+  - its threads claim shipped tasks from the **newest** end of the queue while workers take the oldest
+    first, so they can only collide where they meet. A 60 s "unclaimed for a while" rule, tried first,
+    still wasted 805 games: big batches sit queued for minutes;
   - with no live remote worker, everything is local as before. A remote that dies is still counted alive
-    for up to the 120 s lease, so the coordinator may wait up to 60 s before taking its unclaimed tasks.
+    for up to the 120 s lease; the coordinator keeps claiming from the newest end meanwhile.
 - **Tail.** When the queue is empty, idle local threads replay a task a remote worker has held for longer
   than 2× the median task time (at least **90 s**, `BC_DIST_MIN_STEAL`; one Syncthing round trip must fit
   inside it; 30 s before any task has finished). A slow or vanished

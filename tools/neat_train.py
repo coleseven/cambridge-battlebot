@@ -37,6 +37,7 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
+import dist  # noqa: E402
 import duel_train  # noqa: E402
 import nvn  # noqa: E402
 
@@ -375,7 +376,9 @@ def run_nvn(a):
         secs = time.perf_counter() - t0
         mean = lambda i: round(sum(v[i] for v in summary.values() if v[i] is not None) / len(summary), 3)  # noqa: E731
         with log.open("a") as fh:
-            fh.write(json.dumps({"gen": gen, "team_size": n, "secs": round(secs), "mean_fit": mean(0),
+            dst = dist.take_stats(a.dist) if a.dist else None
+            fh.write(json.dumps({"gen": gen, "team_size": n, "secs": round(secs), **({"dist": dst} if dst else {}),
+                                 "mean_fit": mean(0),
                                  f"mean_f{n}v{n}": mean(1), "mean_f1v1": mean(2), "best": summary}) + "\n")
         print(f"gen {gen:4} {n}v{n} {secs:6.0f}s  fit {mean(0):+.2f}  {n}v{n} {mean(1):+.2f}  1v1 {mean(2):+.2f}  " +
               " ".join(f"{k}:{v[1]:+.1f}/{v[2]:+.1f}/{v[3]}n{v[4]}c" for k, v in summary.items()), flush=True)

@@ -51,6 +51,7 @@ claimed/<id>@<worker>.json   task being played (renamed from queue/ = the claim)
 results/<id>.json            finished task; the coordinator ingests it into its arena cache and deletes it
 workers/<name>.json          heartbeat of every worker (and of each coordinator's local worker <coord>-local)
 bases/<base id>/bot.wasm, bot-injected.wasm    coordinator's base build, genome emptied (for --adopt-base)
+locks/<id>.lock              claim lock (O_EXCL), held from claim until complete/release/reap
 ```
 
 All writes are tmp-file + rename, so nobody reads half a file.
@@ -73,8 +74,10 @@ All writes are tmp-file + rename, so nobody reads half a file.
 
 ## Claims and leases
 
-- **Claim:** `os.rename(queue/<id>.json → claimed/<id>@<worker>.json)`. On one filesystem only one rename
-  wins; losers move on to the next file. A worker claims only tasks it can play (same cambc version, every
+- **Claim:** create `locks/<id>.lock` with `O_CREAT|O_EXCL`, then
+  `os.rename(queue/<id>.json → claimed/<id>@<worker>.json)`. The lock is what makes the claim exclusive on one
+  machine: on NTFS two concurrent renames of one file can both succeed. A lock with no claim file older than
+  30 s is a leftover of a crash and is cleared. A worker claims only tasks it can play (same cambc version, every
   bot reproducible). Other tasks stay queued for another worker.
 - **Heartbeat:** each worker rewrites `workers/<name>.json` with an increasing `seq`:
   - remote workers every 10 s;
@@ -151,10 +154,65 @@ name). Each one ingests only its own results.
 | Coordinator killed | Workers finish what they hold; results wait in `results/`. Restart resumes (above). |
 | No remote worker at all | Local threads play everything; same results as `arena.play_many`. |
 | Torn heartbeat/task read | Ignored until the next poll (all writes are atomic renames). |
+| Same task claimed on two machines (Syncthing) | Both play it; one result is used, the other counts as `dup`. See below. |
+
+## Over Syncthing (two machines)
+
+`.arena/dist` is in the Syncthing allow-list (`!/dist` in `tools/stignore.txt`). The O_EXCL lock and the
+rename are exclusive only on one machine. So two machines can claim the same task before either's change
+has synced. The end states are covered by `SyncthingStates` in `tools/test_dist.py`:
+
+- **Both machines claim and finish a task.** One `results/<id>.json` survives. The other arrives as
+  `results/<id>.sync-conflict-<date>-<time>-<device>.json`, which still matches `*.json`. The coordinator
+  ingests both and deletes both. The second is counted as `dup`; it is never used twice.
+- **A conflict copy of a claim** (`claimed/<id>@w.sync-conflict-….json`) belongs to worker `w`. It is not
+  requeued while `w` is alive, and it is dropped once the task's result exists.
+- **A conflict copy of a queued task** is claimable like any task (at worst a duplicate play). Once all its
+  games are cached, the coordinator's `tidy()` deletes it.
+- **Conflict copies in `workers/` and `locks/`** are never read. The reaper deletes them.
+- **A lock that arrives before its claim file:** the task is skipped while the lock is fresh, and the lock is
+  cleared after 30 s if the claim never shows up. Lock mtimes come from the other machine, so clock skew
+  shifts that 30 s window (harmless).
+
+Leases need heartbeats to propagate well inside `BC_DIST_LEASE` (120 s). Heartbeats are written every 10 s,
+and Syncthing's file watcher syncs within ~10–20 s, so keep **"Watch for Changes" on** for the folder. If
+changes only sync at the hourly rescan, remote claims look dead. They get requeued and replayed:
+results stay correct, but the night PC's work is mostly wasted (it shows up as a high `waste` in the report).
+
+## Measuring the speed-up (roadmap 1b success test)
+
+When `--dist` is on, the N-v-N trainers (`neat_train.py` / `cgp_train.py run --team-size N`) add a `"dist"`
+block to each generation's line in `log.jsonl`:
+
+```json
+"dist": {"games": 880, "cached": 10, "local": 190, "remote": 680, "stolen": 12, "dup": 12, "secs": 275.0,
+         "by_worker": {"nightpc": 692}, "workers": ["nightpc"], "t": 1792195200}
+```
+
+- `games` = distinct games of the generation, split by where each result came from: `cached`, `local`
+  (coordinator threads) or `remote`.
+- `stolen` = local replays of slow remote claims.
+- `dup` = remote results that arrived after the game was already known.
+- `by_worker` = remote results received per worker, duplicates included.
+- `workers` = remote workers seen alive during the generation.
+- `t` = when the generation ended (epoch).
+
+```
+.venv/Scripts/python tools/dist_report.py n2v2 [--last 30] [--since-gen G] [--root .arena/dist]
+```
+
+The report lists the last generations, then groups all of them by the set of remote workers seen. The groups
+are `solo` (dist on, no remote worker), `nightpc`, and `no stats` for generations logged before this block
+existed. For each group it prints:
+- median seconds per generation and seconds per played game;
+- games/h, remote share and waste (`stolen + dup`);
+- the speed-up against `solo` (or against `no stats` if there is no solo generation yet).
+
+The speed-up compares seconds per played game, so cache hits don't flatter a group.
 
 ## Tests
 
-- `.venv/Scripts/python -m unittest tools/test_dist.py -v`: 22 tests with fake games. They cover:
+- `.venv/Scripts/python -m unittest tools/test_dist.py -v`: 29 tests with fake games. They cover:
   - claim races (8 threads, 40 tasks, each claimed once);
   - idempotent submit;
   - lease expiry for a killed worker (lease holds while the heartbeat moves, then requeues), for a worker
@@ -165,7 +223,8 @@ name). Each one ingests only its own results.
   - blob → worker rebuild reproducing `neat_train.patch` byte for byte, and `--adopt-base`;
   - the coordinator with a fake engine: zero workers = local results, two fake remote workers = local
     results, a remote worker killed mid-task, coordinator restart with a finished task (not replayed), and
-    remote error → local replay, local engine exception re-raised.
+    remote error → local replay, local engine exception re-raised;
+  - Syncthing end states (above), the per-generation stats and the report's speed-up maths.
 - `.venv/Scripts/python tools/dist_e2e.py [--team-size 2] [--games 12] [--no-kill]`: the real engine on
   one machine. It:
   1. makes two worker checkouts (copies sharing this `.venv`);
@@ -181,12 +240,10 @@ name). Each one ingests only its own results.
 
 ## Not tested yet
 
-- **Two real machines over Syncthing.** Everything above assumed one filesystem, where rename is an atomic
-  claim. Under Syncthing two machines can both "claim" the same task before the renames sync. Both then
-  play it, which is harmless but wasted.
-  - To try it, add `!/dist` to `tools/stignore.txt` (not done here: the default sync set is unchanged).
-  - Sync latency adds to every task, so use bigger batches (`BC_DIST_BATCH=8`+).
-  - Syncthing may create `*.sync-conflict-*` files in `workers/`. They are ignored (not `*.json`).
+- **Syncthing in a long run.** A cross-PC run of 417 games has been played (~3.2k games/h at 4 jobs).
+  The sync end states are unit-tested (above), but the duplicate rate and sync latency over a full night are
+  not known yet. `dist_report.py` shows both (`waste`, and s/game against `solo`). If the waste is high, try
+  bigger batches (`BC_DIST_BATCH=8`+).
 - **Windows ↔ Linux base ids.** Whether a Windows and a Linux build of `bots/neat` give the same wasm bytes.
   If not, start the Linux/cloud workers with `--adopt-base`.
 - **The 1b success test.** A real 2v2 generation (~20 min on the training PC) with the night PC attached;

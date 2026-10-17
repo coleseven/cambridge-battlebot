@@ -141,6 +141,7 @@ def main():
               f"round {x.get('round')}")
     print(f"games played: w1 {hbs['w1'].get('games', 0)} (killed: {bool(killed)}), w2 {hbs['w2'].get('games', 0)}, "
           f"coordinator-local {hbs['e2e-local'].get('games', 0)}; results used by source {coord.last}")
+    print(f"generation stats (as logged by the trainers): {dict(coord.stats, workers=sorted(coord.stats['workers']))}")
     print(f"distributed {t_dist:.0f}s, local reference {t_local:.0f}s")
     print(f"{same}/{len(games)} games identical, errors {errs}")
     leftover = [p.name for s in ("queue", "claimed") for p in (root / s).glob("*.json")]

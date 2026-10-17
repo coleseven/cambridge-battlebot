@@ -58,6 +58,32 @@ Rules for the night window:
 - **Success test:** a 2v2 generation that takes ~20 min on the training PC alone takes ≈4–5 min with
   the night PC attached, with identical results for identical games.
 
+**First real test (17 Oct 10:30): no speed-up, because of latency.** With the main PC attached, one
+2v2 NEAT generation ran 0.90× solo speed:
+- only 28 of ~1,800 played games came from the remote worker;
+- 272 remote results were wasted duplicates.
+
+Cause:
+- `nvn.evaluate` calls `play_many` once per hero per group of 8 candidates: 33 small calls of ~200
+  games, each finishing locally in ~20–30 s.
+- A Syncthing round trip (task out, result back) takes ~20–40 s.
+- So the coordinator plays, or steal-replays, almost everything before remote results arrive.
+
+The worker, transport and adopt-base all work (the worker ran ~10k games/h whenever it had tasks).
+
+**Fix (next dev session):**
+- Evaluate a **whole generation in one `play_many` call** (all heroes × all candidates, ~3.7k games),
+  so latency is paid once per generation, not 33 times. The coordinator's local threads should play
+  through the same task path as workers (patch a slot per task from the blob), so the number of
+  candidates is no longer limited by the coordinator's 8 slots.
+- **Steal threshold** at least one Syncthing round trip (e.g. ≥ 90 s, or measured from task timings),
+  so slow-to-sync remote claims aren't replayed.
+- Optionally the coordinator holds back its own claims while live remote workers have spare capacity.
+- Re-run the 1b success test afterwards.
+
+The "CAMBC night worker" scheduled task (`tools/night_worker.cmd`, daily 00:00, path quoting fixed on
+17 Oct) is **disabled** until this lands. Re-enable with `Enable-ScheduledTask -TaskName 'CAMBC night worker'`.
+
 ### 1c. Scaling test (gate for buying compute)
 - Same setup, same wall-clock time: 1× (training PC only) vs ~5× (both machines). Compare league
   score against fixed opponents over time.

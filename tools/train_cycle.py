@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--pairings", type=int, default=5)
     ap.add_argument("--duels", type=int, default=2)
     ap.add_argument("--dist", default="", help="shared dist folder for tools/dist_worker.py workers (default off)")
+    ap.add_argument("--freeze-cgp", action="store_true",
+                    help="don't train CGP (its elites stay frozen); the champion refresh still compares against them")
     a = ap.parse_args()
     common = ["--gens", str(a.block), "--seed-from", a.seed_from, "--jobs", str(a.jobs), "--slots", str(a.slots)]
     common += ["--dist", a.dist] if a.dist else []
@@ -58,7 +60,7 @@ def main():
     while a.rounds == 0 or n < a.rounds:
         n += 1
         for tool, name in (("tools/neat_train.py", a.neat), ("tools/cgp_train.py", a.cgp)):
-            if not name:
+            if not name or (tool == "tools/cgp_train.py" and a.freeze_cgp):
                 continue
             rc = step([tool, "run", name, *common, *extra[tool]])
             if rc:

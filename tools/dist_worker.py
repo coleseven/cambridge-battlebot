@@ -239,7 +239,7 @@ def status(root):
     print(f"{'worker':24} {'host':16} {'state':9} {'seen':>7} {'jobs':>4} {'claims':>6} {'games':>7} {'games/h':>8}")
     total = 0.0
     for p in sorted((root / "workers").glob("*.json")):
-        hb = dist.read_json(p)
+        hb = None if dist.is_conflict(p.name) else dist.read_json(p)
         if not hb:
             continue
         age = now - hb.get("at_epoch", 0)

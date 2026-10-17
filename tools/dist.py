@@ -171,8 +171,18 @@ def claim_name(tid: str, worker: str) -> str:
     return f"{tid}@{worker}.json"
 
 
+CONFLICT = ".sync-conflict-"   # Syncthing's name for the losing copy: <stem>.sync-conflict-<date>-<time>-<dev>.<ext>
+
+
+def is_conflict(name: str) -> bool:
+    return CONFLICT in name
+
+
 def parse_claim(name: str):
+    """claimed/<id>@<worker>.json -> (id, worker). A Syncthing conflict copy of a claim belongs to the same
+    worker (otherwise it would look like a dead worker and be requeued after a lease)."""
     stem = name[:-5] if name.endswith(".json") else name
+    stem = stem.split(CONFLICT)[0]
     tid, _, worker = stem.partition("@")
     return tid, worker
 
@@ -343,6 +353,11 @@ class Reaper:
             except OSError:
                 pass
         self.claims = {k: v for k, v in self.claims.items() if k in names}
+        # Conflict copies of heartbeats and locks are never authoritative (queue/claimed/results copies
+        # are handled above or by the coordinator): delete them so they do not pile up.
+        for sub in ("workers", "locks"):
+            for p in (self.root / sub).glob(f"*{CONFLICT}*"):
+                p.unlink(missing_ok=True)
         return out
 
 
@@ -350,7 +365,7 @@ def live_workers(root: Path, lease=LEASE):
     """Heartbeats younger than `lease` by wall clock (for status/fallback decisions only, never for reaping)."""
     out = []
     for p in sorted((Path(root) / "workers").glob("*.json")):
-        hb = read_json(p)
+        hb = None if is_conflict(p.name) else read_json(p)
         if hb and hb.get("state") != "stopped" and time.time() - hb.get("at_epoch", 0) <= lease:
             out.append(hb)
     return out
@@ -396,6 +411,14 @@ class Coordinator:
         self.reaper = Reaper(self.root, lease=lease)
         self.hb = Heartbeat(self.root, self.worker, role="coordinator", cambc=arena.cambc_version())
         self.task_secs = []     # durations of finished tasks (remote and local), for the steal threshold
+        self.reset_stats()
+
+    def reset_stats(self):
+        """Counters since the last take_stats() (one trainer generation): distinct games by where their result
+        came from, local replays of slow remote claims, duplicate remote results, games per remote worker,
+        and the remote workers seen alive."""
+        self.stats = {"games": 0, "cached": 0, "local": 0, "remote": 0, "stolen": 0, "dup": 0, "secs": 0.0,
+                      "by_worker": {}, "workers": set()}
 
     # results/ -> arena cache. Returns {key: result} of every task of ours that came back.
     def ingest(self):
@@ -406,8 +429,14 @@ class Coordinator:
                 continue
             if r.get("secs") is not None:
                 self.task_secs = (self.task_secs + [float(r["secs"])])[-200:]
+            remote = r.get("worker") != self.worker
             for key, res in r.get("results", {}).items():
                 got[key] = res
+                if remote:
+                    known = "error" not in res and cached(key) is not None
+                    self.stats["dup"] += known
+                    w = r.get("worker", "?")
+                    self.stats["by_worker"][w] = self.stats["by_worker"].get(w, 0) + 1
                 cache_put(res)
             p.unlink(missing_ok=True)
         return got
@@ -470,7 +499,7 @@ class Coordinator:
         local = [k for k in by_key if k not in shipped and k not in done]
         busy, stop, failures = set(), threading.Event(), []
 
-        def play_local(k):
+        def play_local(k, stolen=False):
             with lock:
                 if k in done or k in busy:
                     return
@@ -488,6 +517,7 @@ class Coordinator:
                 if k not in done or "error" in done[k]:
                     done[k] = r
                     src[k] = "cached" if r.get("cached") else "local"
+                    self.stats["stolen"] += stolen and not r.get("cached")
             if not r.get("cached"):
                 self.hb.add(games=1)
 
@@ -509,7 +539,7 @@ class Coordinator:
                     continue
                 t0 = time.time()
                 for g in t["games"]:
-                    play_local(g["key"])
+                    play_local(g["key"], stolen=bool(t.get("stolen")))
                 with lock:
                     res = {g["key"]: strip(done[g["key"]]) for g in t["games"] if g["key"] in done}
                 if len(res) == len(t["games"]) and (self.root / "claimed" / claim_name(t["id"], self.worker)).exists():
@@ -522,7 +552,7 @@ class Coordinator:
         threads = [threading.Thread(target=worker_loop, daemon=True) for _ in range(max(1, jobs))]
         for th in threads:
             th.start()
-        retried, last = set(), -1
+        retried, last, t_start = set(), -1, time.time()
         try:
             while True:
                 for k, r in self.ingest().items():
@@ -536,6 +566,8 @@ class Coordinator:
                             done[k], src[k] = r, "remote"
                 self.reaper.reap()
                 self.hb.beat()
+                self.stats["workers"].update(h["name"] for h in live_workers(self.root)
+                                             if h["name"] != self.worker and h.get("role") != "coordinator")
                 with lock:
                     n = sum(k in done for k in by_key)
                     pending = any(k not in done for k in by_key) or busy
@@ -554,8 +586,15 @@ class Coordinator:
             for tid in mine:
                 for p in (self.root / "claimed").glob(f"{tid}@{self.worker}.json"):
                     release(self.root, self.worker, tid)
+            # Final sweep: results our own threads wrote after the loop's last ingest (seen on Windows,
+            # where play_many returned with its local tasks' results/<id>.json still on disk).
+            self.ingest()
             self.hb.beat(state="idle")
         self.last = {s: sum(v == s for v in src.values()) for s in ("cached", "local", "remote")}
+        for s_, n_ in self.last.items():
+            self.stats[s_] += n_
+        self.stats["games"] += len(by_key)
+        self.stats["secs"] += time.time() - t_start
         out = []
         for (a, b, m), k in zip(games, keys):
             r = done[k]
@@ -600,6 +639,18 @@ def play_many(games, jobs=arena.DEFAULT_JOBS, progress=False, root=None):
     if not root:
         return arena.play_many(games, jobs, progress)
     return coordinator(root).play_many(games, jobs, progress)
+
+
+def take_stats(root=None):
+    """Distribution counters of every coordinator in this process since the last call (then reset), as a
+    JSON-ready dict for a trainer's per-generation log line; None when distribution is off."""
+    root = root or os.environ.get(ENV)
+    if not root:
+        return None
+    c = coordinator(root)
+    st = dict(c.stats, secs=round(c.stats["secs"], 1), workers=sorted(c.stats["workers"]), t=round(time.time()))
+    c.reset_stats()
+    return st
 
 
 def add_arg(ap):

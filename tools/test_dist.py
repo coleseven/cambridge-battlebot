@@ -2,7 +2,11 @@
 
   .venv/Scripts/python -m unittest tools/test_dist.py -v
 """
+import contextlib
 import hashlib
+import io
+import json
+import os
 import shutil
 import struct
 import sys
@@ -17,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arena  # noqa: E402
 import dist  # noqa: E402
+import dist_report  # noqa: E402
 import dist_worker  # noqa: E402
 
 
@@ -182,7 +187,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(datetime.fromtimestamp(dist_worker.deadline("12:00", now)), datetime(2026, 10, 17, 12, 0))
 
 
-class FakeEngine(unittest.TestCase):
+class EngineCase(unittest.TestCase):
     """Coordinator with a fake engine: arena.play, the cache and the bot specs are replaced."""
 
     def setUp(self):
@@ -256,6 +261,8 @@ class FakeEngine(unittest.TestCase):
     def norm(rs):
         return [{k: v for k, v in r.items() if k != "cached"} for r in rs]
 
+
+class FakeEngine(EngineCase):
     def test_zero_remote_workers_matches_local(self):
         want = self.local()
         got = dist.play_many(self.games, 4, root=self.root)
@@ -333,6 +340,139 @@ class FakeEngine(unittest.TestCase):
         dist.complete(self.root, "bad", t, {g["key"]: {"key": g["key"], "error": "boom"} for g in t["games"]}, 0)
         got = c.play_many(self.games, 2)
         self.assertEqual(self.norm(got), self.norm(want))
+
+
+SYNC = ".sync-conflict-20261017-010203-ABCDEFG"
+
+
+class SyncthingStates(EngineCase):
+    """States two machines can reach once Syncthing has merged their dist folders (renames are not atomic
+    across machines, and a file written on both sides keeps one copy as <stem>.sync-conflict-...<ext>)."""
+
+    def tasks(self, c):
+        ts = c.make_tasks(self.games, [dist.game_key(*g) for g in self.games])
+        for t in ts:
+            dist.submit(self.root, t)
+        return ts
+
+    def test_task_claimed_and_finished_on_both_machines(self):
+        want = self.local()
+        dist.ensure(self.root)
+        c = dist.Coordinator(self.root, poll=0.02)
+        t = self.tasks(c)[0]
+        res = {g["key"]: fake_result(g["key"]) for g in t["games"]}
+        assert dist.claim(self.root, "nightpc")["id"] == t["id"]
+        dist.write_json(self.root / "claimed" / dist.claim_name(t["id"], "laptop"), t)   # the other machine's claim
+        dist.complete(self.root, "nightpc", t, res, 1.0)
+        # laptop's result arrives as the conflict copy of results/<id>.json; its claim file is gone after sync
+        dist.write_json(self.root / "results" / f"{t['id']}{SYNC}.json",
+                        {"id": t["id"], "coord": c.name, "worker": "laptop", "secs": 1.0, "results": res})
+        (self.root / "claimed" / dist.claim_name(t["id"], "laptop")).unlink()
+        got = c.play_many(self.games, 2)
+        self.assertEqual(self.norm(got), self.norm(want))
+        self.assertEqual(c.stats["dup"], len(t["games"]))          # second copy counted as waste, not used twice
+        self.assertEqual(c.stats["by_worker"], {"nightpc": len(t["games"]), "laptop": len(t["games"])})
+        for sub in ("queue", "claimed", "results"):
+            self.assertEqual(list((self.root / sub).glob("*")), [], sub)
+
+    def test_conflict_copy_of_a_claim_belongs_to_its_worker(self):
+        dist.ensure(self.root)
+        clock = Clock()
+        reaper = dist.Reaper(self.root, lease=60, clock=clock)
+        hb = dist.Heartbeat(self.root, "nightpc")
+        dist.submit(self.root, task("a"))
+        dist.claim(self.root, "nightpc")
+        conflict = self.root / "claimed" / f"a@nightpc{SYNC}.json"
+        dist.write_json(conflict, task("a"))
+        self.assertEqual(dist.parse_claim(conflict.name), ("a", "nightpc"))
+        for t in range(0, 600, 30):              # nightpc alive: neither copy is requeued
+            clock.t = t
+            hb.beat()
+            self.assertEqual(reaper.reap(), [])
+        dist.complete(self.root, "nightpc", task("a"), {"k1": fake_result("k1")}, 1.0)
+        reaper.reap()                            # result exists: the leftover conflict copy is dropped
+        self.assertEqual(list((self.root / "claimed").glob("*")), [])
+        self.assertEqual(list((self.root / "queue").glob("*")), [])
+
+    def test_conflict_copy_in_queue_is_tidied_once_done(self):
+        want = self.local()
+        dist.ensure(self.root)
+        c = dist.Coordinator(self.root, poll=0.02)
+        self.assertEqual(self.norm(c.play_many(self.games, 2)), self.norm(want))
+        t = c.make_tasks(self.games[:4], [dist.game_key(*g) for g in self.games[:4]])
+        self.assertEqual(t, [])                                    # everything cached now
+        old = {"id": "old", "coord": c.name, "cambc": "cambc test", "bots": {}, "maps": {},
+               "games": [{"key": dist.game_key(*self.games[0]), "a": "x", "b": "y", "map": "m"}]}
+        dist.write_json(self.root / "queue" / f"old{SYNC}.json", old)
+        c.play_many(self.games, 2)
+        self.assertEqual(list((self.root / "queue").glob("*")), [])
+
+    def test_heartbeat_and_lock_conflict_copies_are_ignored_and_swept(self):
+        dist.ensure(self.root)
+        hb = dist.Heartbeat(self.root, "nightpc")
+        hb.beat(state="busy")
+        (self.root / "locks").mkdir(exist_ok=True)
+        dist.write_json(self.root / "workers" / f"nightpc{SYNC}.json", dict(hb.info, seq=999, state="stopped"))
+        (self.root / "locks" / f"a{SYNC}.lock").write_text("laptop")
+        self.assertEqual([h["name"] for h in dist.live_workers(self.root)], ["nightpc"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dist_worker.status(self.root)
+        self.assertEqual(sum(line.startswith("nightpc") for line in out.getvalue().splitlines()), 1)
+        dist.Reaper(self.root).reap()
+        self.assertEqual(sorted(p.name for p in (self.root / "workers").iterdir()), ["nightpc.json"])
+        self.assertEqual(list((self.root / "locks").iterdir()), [])
+
+    def test_lock_synced_before_its_claim(self):
+        """The other machine's lock arrives first: the task is skipped while the lock is fresh, and a lock
+        whose claim never shows up is cleared after LOCK_STALE_SECS."""
+        dist.ensure(self.root)
+        dist.submit(self.root, task("a"))
+        lock = dist._lock(self.root, "a")
+        lock.write_text("laptop")
+        self.assertIsNone(dist.claim(self.root, "nightpc"))
+        old = time.time() - dist.LOCK_STALE_SECS - 5
+        os.utime(lock, (old, old))
+        self.assertIsNone(dist.claim(self.root, "nightpc"))       # clears the stale lock
+        self.assertEqual(dist.claim(self.root, "nightpc")["id"], "a")
+
+
+class StatsAndReport(EngineCase):
+    def test_take_stats_counts_sources(self):
+        dist.ensure(self.root)
+        stop = threading.Event()
+        th = threading.Thread(target=self.remote_worker, args=("r0", stop))
+        th.start()
+        try:
+            got = dist.play_many(self.games, 1, root=self.root)
+        finally:
+            stop.set()
+            th.join()
+        st = dist.take_stats(self.root)
+        distinct = len({r["key"] for r in got})
+        self.assertEqual(st["games"], distinct)
+        self.assertEqual(st["cached"] + st["local"] + st["remote"], distinct)
+        self.assertEqual(st["by_worker"].get("r0", 0), st["remote"] + st["dup"])
+        self.assertIn("r0", st["workers"])
+        json.dumps(st)
+        self.assertEqual(dist.take_stats(self.root)["games"], 0)   # reset after each take
+        self.assertIsNone(dist.take_stats(""))
+
+    def test_report_speedup(self):
+        def gen(g, secs, local, remote, workers):
+            return {"gen": g, "secs": secs, "dist": {"games": local + remote, "local": local, "remote": remote,
+                                                     "cached": 0, "stolen": 0, "dup": 1, "secs": secs,
+                                                     "by_worker": {w: remote for w in workers}, "workers": workers,
+                                                     "t": 0}}
+        rows = [{"gen": 0, "secs": 1300}] + [gen(i, 1200, 400, 0, []) for i in range(1, 4)] + \
+               [gen(i, 300, 100, 300, ["nightpc"]) for i in range(4, 7)]
+        summary = dist_report.summarise(rows)
+        base, sp = dist_report.speedups(summary)
+        self.assertEqual(base, "solo")
+        self.assertAlmostEqual(sp["nightpc"], 4.0)
+        night = next(s for s in summary if s["group"] == "nightpc")
+        self.assertAlmostEqual(night["remote_share"], 0.75)
+        self.assertEqual(night["by_worker"], {"nightpc": 900})
 
 
 class BlobTests(unittest.TestCase):

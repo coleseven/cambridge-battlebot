@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import random
 import re
 import struct
@@ -187,6 +188,53 @@ def evaluate(nt, progs, hero, sched, team_progs, elite_bot, anchor, cand_slots, 
             f1 = m(by.get(1, []))
             fn = m([s for sz, v in by.items() if sz != 1 for s in v])
             out[i] = (sum(allg) / len(allg), fn, f1)
+        _report({(hero, i): out[i] for i in acc}, res, f"evaluate {PICKS[hero]}")
+    return out
+
+
+def _report(scored, results, label):
+    """Print errored games (they score -5 and silently lower a candidate's fitness); with env BC_EVAL_DUMP
+    set, append every candidate's fitness as JSON lines (tools/batch_equiv.py compares them)."""
+    errs = [r["error"] for r in results if "error" in r]
+    if errs:
+        print(f"  {label}: {len(errs)} of {len(results)} games errored, e.g. {errs[0][-200:]}", flush=True)
+    path = os.environ.get("BC_EVAL_DUMP")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            for (hero, i), v in sorted(scored.items()):
+                print(json.dumps({"hero": hero, "i": i, "fit": v[0], "fn": v[1], "f1": v[2]}), file=fh)
+
+
+def evaluate_many(nt, batch, team_progs, elite_bot, anchor, cand_slots, a):
+    """Whole-generation evaluation: `batch` is [(hero, progs, sched)] for every hero; all candidates of all
+    heroes are played in ONE call (dist.play_slots), so distributed workers pay the sync latency once per
+    generation instead of once per hero x slot group. Candidates are BlobBots (no slot of their own);
+    cand_slots are the local threads' playing slots (two per thread). Same games and scoring as evaluate(),
+    so the fitness is identical. Returns {hero: [(fitness, f_nvn, f_1v1)] in progs order}."""
+    ref = cand_slots[0]
+    games, meta = [], []
+    out = {}
+    for hero, progs, sched in batch:
+        out[hero] = [(-50.0, None, None)] * len(progs)
+        for i, prog in enumerate(progs):
+            if prog is None:
+                continue
+            bot = dist.virtual_bot(ref, team_blob(nt, team_progs, a.resign, hero, prog), f"{PICKS[hero]}{i}")
+            for size, layout, own, opp, kind in sched:
+                ob = elite_bot if kind == "elite" else anchor
+                games.append((bot, ob, map_path(size, layout, own, opp))); meta.append((hero, i, size, 0))
+                games.append((ob, bot, map_path(size, layout, opp, own))); meta.append((hero, i, size, 1))
+    res = dist.play_slots(games, a.jobs, cand_slots, root=getattr(a, "dist", None))
+    acc = {}
+    for (hero, i, size, seat), r in zip(meta, res):
+        if "error" not in r and a.resign and r["round"] > a.resign + 2:
+            r = {"error": "slot rebuilt (genome lost)"}
+        acc.setdefault((hero, i), {}).setdefault(size, []).append(duel_train.side_score(r, seat))
+    for (hero, i), by in acc.items():
+        allg = [s for v in by.values() for s in v]
+        m = lambda v: sum(v) / len(v) if v else None   # noqa: E731
+        out[hero][i] = (sum(allg) / len(allg), m([s for sz, v in by.items() if sz != 1 for s in v]), m(by.get(1, [])))
+    _report({(h, i): out[h][i] for h, i in acc}, res, "evaluate_many")
     return out
 
 
@@ -196,6 +244,8 @@ def add_args(r):
     r.add_argument("--pairings", type=int, default=5, help="N-v-N team pairings per hero per generation")
     r.add_argument("--duels", type=int, default=2, help="1v1 retention duels per hero per generation (N>1)")
     r.add_argument("--warm-run", default="", help="N>1: warm-start from this 1v1 run (same trainer kind)")
+    r.add_argument("--per-hero", action="store_true", help="N>1: evaluate hero by hero in slot-sized groups "
+                   "(the pre-17-Oct path) instead of the whole generation in one batch")
     r.add_argument("--warm-arena", default="", help="N>1: .arena holding --warm-run and the 1v1 champion "
                    "set (read-only; default this checkout's .arena)")
     dist.add_arg(r)

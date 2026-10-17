@@ -31,13 +31,17 @@ import struct
 import threading
 import time
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
 
 import arena
 
 ENV = "BC_DIST"                       # root folder; set (or pass --dist) to switch distribution on
 BATCH = int(os.environ.get("BC_DIST_BATCH", "4"))
-LEASE = float(os.environ.get("BC_DIST_LEASE", "120"))    # s without a heartbeat change -> worker dead
+LEASE = float(os.environ.get("BC_DIST_LEASE", "120"))
+# Idle local threads replay a remote claim only after this long (and 2x the median task time). It must exceed
+# one Syncthing round trip (task out + result back, ~20-40 s), or remote results arrive after the replay.
+MIN_STEAL = float(os.environ.get("BC_DIST_MIN_STEAL", "90"))    # s without a heartbeat change -> worker dead
 MAX_CLAIM = float(os.environ.get("BC_DIST_MAX_CLAIM", "3600"))   # s a claim may last whatever the heartbeat
 MAGIC = struct.pack("<II", 0x4E454154, 0x424C4F42)
 REGION = 16384 * 4                    # bytes of the genome block (bots/neat/src/genome.h GENOME_WORDS)
@@ -54,6 +58,16 @@ def ensure(root) -> Path:
     for s in SUBDIRS:
         (root / s).mkdir(parents=True, exist_ok=True)
     return root
+
+
+def rm(path: Path) -> bool:
+    """Delete a queue file if possible. On Windows a file another thread or process has open cannot be
+    deleted (PermissionError); every caller tolerates a leftover, which a later pass removes."""
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def write_json(path: Path, obj):
@@ -111,6 +125,8 @@ def bot_spec(bot: arena.Bot):
     """What a worker needs to rebuild `bot` exactly, or None if it can only be played here.
     {"kind": "blob", "base": .., "blob": ..} for a patched bots/neat slot, {"kind": "dir", "dir": "bots/x"}
     for a repo bot directory; both carry the wasm hash the worker must reproduce."""
+    if isinstance(bot, BlobBot):
+        return {"kind": "blob", "base": bot.base, "blob": _b64z(bot.blob), "hash": bot.hash}
     ck = (str(bot.path), bot.hash)
     with _spec_lock:
         if ck in _spec_cache:
@@ -142,10 +158,15 @@ def publish_base(root: Path, bot: arena.Bot, base: str):
     if (d / WASMS[1]).exists():
         return
     d.mkdir(parents=True, exist_ok=True)
-    for n in WASMS:
-        data = (Path(bot.path) / ".cambc" / "build" / n).read_bytes()
+    if isinstance(bot, BlobBot):
+        with _bases_lock:
+            pair = _bases[base]
+    else:
+        pair = [(Path(bot.path) / ".cambc" / "build" / n).read_bytes() for n in WASMS]
+        pair = [zeroed(x, _region(x)) for x in pair]
+    for n, z in zip(WASMS, pair):
         tmp = d / f".{n}.{os.getpid()}.tmp"
-        tmp.write_bytes(zeroed(data, _region(data)))
+        tmp.write_bytes(z)
         os.replace(tmp, d / n)
 
 
@@ -159,6 +180,126 @@ def apply_blob(base_wasms, blob: bytes):
         if i < 0:
             raise ValueError("base wasm has no genome block")
         out.append(d[:i] + blob + bytes(REGION - len(blob)) + d[i + REGION:])
+    return out
+
+
+# ---------------------------------------------------------------- virtual network bots
+_bases: dict = {}          # base hash -> (bot.wasm, bot-injected.wasm) with the genome block zeroed
+_bases_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class BlobBot:
+    """A bots/neat build that exists only as base + genome blob (no directory of its own). Used where a
+    generation has more candidates than slots: tasks carry the blob, and whoever plays the game (a remote
+    worker or a coordinator thread) patches it into one of its own slots first. Same `name`/`hash` fields
+    as arena.Bot, so game keys and the arena cache are unchanged."""
+    name: str
+    hash: str
+    base: str
+    blob: bytes
+    path: Path | None = None
+
+
+def base_of(slot: Path):
+    """(base hash, zeroed wasm pair) of a built bots/neat slot; the pair is registered for BlobBots."""
+    data = [(Path(slot) / ".cambc" / "build" / n).read_bytes() for n in WASMS]
+    z = tuple(zeroed(d, _region(d)) for d in data)
+    b = base_hash(data)
+    with _bases_lock:
+        _bases.setdefault(b, z)
+    return b, z
+
+
+def virtual_bot(ref_slot: Path, blob: bytes, name: str) -> BlobBot:
+    """The bot neat_train.patch(ref_slot, blob) would produce, without touching ref_slot."""
+    b, z = base_of(ref_slot)
+    blob = blob.rstrip(bytes(1))
+    blob += bytes(-len(blob) % 4)
+    data = apply_blob(z, blob)
+    return BlobBot(name, hashlib.sha256(data[1]).hexdigest()[:16], b, blob)
+
+
+class SlotPlayer:
+    """Plays games whose bots may be BlobBots on this machine, giving each thread its own pair of built
+    bots/neat slots. A BlobBot is materialised by rewriting only the genome block in place (64 KB, not the
+    3.3 MB files), and not at all when the slot already holds that bot."""
+
+    def __init__(self, slots):
+        slots = [Path(x) for x in slots]
+        self.pairs = [slots[2 * i:2 * i + 2] for i in range(len(slots) // 2)]
+        if not self.pairs:
+            raise ValueError("SlotPlayer needs at least two slots")
+        self.held = {}          # slot -> hash currently written there
+        self.offs = {}          # slot -> (base hash, [genome offset per wasm])
+
+    @property
+    def jobs(self):
+        return len(self.pairs)
+
+    def materialise(self, bot, slot: Path):
+        if not isinstance(bot, BlobBot):
+            return bot
+        if self.held.get(slot) != bot.hash:
+            build = slot / ".cambc" / "build"
+            if slot not in self.offs or self.offs[slot][0] != bot.base:
+                b, _ = base_of(slot)
+                if b != bot.base:      # a slot of another build: write the whole adopted base once
+                    with _bases_lock:
+                        z = _bases[bot.base]
+                    for n, d in zip(WASMS, apply_blob(z, bot.blob)):
+                        (build / n).write_bytes(d)
+                self.offs[slot] = (bot.base, [_region((build / n).read_bytes()) for n in WASMS])
+            block = bot.blob + bytes(REGION - len(bot.blob))
+            for n, off in zip(WASMS, self.offs[slot][1]):
+                with open(build / n, "r+b") as fh:
+                    fh.seek(off)
+                    fh.write(block)
+            self.held[slot] = bot.hash
+        return arena.Bot(bot.name, slot, bot.hash)
+
+    def play(self, a, b, m, i):
+        """Play one game on pair i (each thread must use its own i)."""
+        pa, pb = self.pairs[i]
+        ra = self.materialise(a, pa)
+        rb = ra if (isinstance(b, BlobBot) and b.hash == a.hash) else self.materialise(b, pb)
+        r = arena.play(ra, rb, m)
+        if isinstance(a, BlobBot) or isinstance(b, BlobBot):
+            for bot in (ra, rb):
+                if arena.sha(Path(bot.path) / ".cambc" / "build" / WASMS[1]) != bot.hash:
+                    self.held.pop(Path(bot.path), None)      # `cambc run` rebuilt it: the genome is gone
+                    return {"key": r.get("key"), "map": Path(m).stem,
+                            "error": f"{bot.path} was rebuilt during play (genome lost)"}
+        return r
+
+
+def play_slots(games, jobs, slots, root=None, progress=False):
+    """Play (a, b, map) games where a/b may be BlobBots, using `slots` (built bots/neat dirs, two per local
+    thread). Distributed through `root` (or env BC_DIST) when set. Results in the order of `games`, shaped
+    like arena.play_many's."""
+    player = SlotPlayer(slots)
+    jobs = max(1, min(jobs, player.jobs))
+    root = root or os.environ.get(ENV)
+    if root:
+        return coordinator(root).play_many(games, jobs, progress, player=player)
+    import concurrent.futures as cf
+    games = [(a, b, arena.resolve_map(m) if not isinstance(m, Path) else m) for a, b, m in games]
+    out = [None] * len(games)
+    order = iter(range(len(games)))
+    lock = threading.Lock()
+
+    def run(i):
+        while True:
+            with lock:
+                k = next(order, None)
+            if k is None:
+                return
+            a, b, m = games[k]
+            hit = cached(game_key(a, b, m))
+            r = {**hit, "cached": True} if hit else player.play(a, b, m, i)
+            out[k] = {**r, "a": a.name, "b": b.name}
+    with cf.ThreadPoolExecutor(jobs) as ex:
+        list(ex.map(run, range(jobs)))
     return out
 
 
@@ -221,7 +362,7 @@ def _lock(root: Path, tid: str) -> Path:
 
 
 def unlock(root: Path, tid: str):
-    (root / "locks" / f"{tid}.lock").unlink(missing_ok=True)
+    rm((root / "locks" / f"{tid}.lock"))
 
 
 def claim(root: Path, worker: str, accept=lambda task: True):
@@ -243,7 +384,7 @@ def claim(root: Path, worker: str, accept=lambda task: True):
             try:   # leftover lock from a crash between lock and rename: clear it, retry on a later pass
                 if (not any((root / "claimed").glob(f"{task['id']}@*.json"))
                         and time.time() - lock.stat().st_mtime > LOCK_STALE_SECS):
-                    lock.unlink(missing_ok=True)
+                    rm(lock)
             except OSError:
                 pass
             continue
@@ -254,7 +395,7 @@ def claim(root: Path, worker: str, accept=lambda task: True):
         try:
             os.rename(p, dest)
         except OSError:            # tidied away or finished meanwhile
-            lock.unlink(missing_ok=True)
+            rm(lock)
             continue
         return task
     return None
@@ -265,8 +406,8 @@ def complete(root: Path, worker: str, task: dict, results: dict, secs: float):
     write_json(root / "results" / f"{task['id']}.json",
                {"id": task["id"], "coord": task.get("coord"), "worker": worker, "secs": round(secs, 2),
                 "finished": now_iso(), "results": results})
-    (root / "claimed" / claim_name(task["id"], worker)).unlink(missing_ok=True)
-    (root / "queue" / f"{task['id']}.json").unlink(missing_ok=True)   # requeued meanwhile: no longer needed
+    rm((root / "claimed" / claim_name(task["id"], worker)))
+    rm((root / "queue" / f"{task['id']}.json"))   # requeued meanwhile: no longer needed
     unlock(root, task["id"])
 
 
@@ -275,7 +416,7 @@ def release(root: Path, worker: str, tid: str):
     src = root / "claimed" / claim_name(tid, worker)
     try:
         if (root / "results" / f"{tid}.json").exists() or (root / "queue" / f"{tid}.json").exists():
-            src.unlink(missing_ok=True)
+            rm(src)
         else:
             os.rename(src, root / "queue" / f"{tid}.json")
     except OSError:
@@ -338,7 +479,7 @@ class Reaper:
             first = self.claims.setdefault(p.name, t)
             tid, worker = parse_claim(p.name)
             if (self.root / "results" / f"{tid}.json").exists():
-                p.unlink(missing_ok=True)         # finished; the worker died before dropping its claim
+                rm(p)         # finished; the worker died before dropping its claim
                 unlock(self.root, tid)
                 continue
             if self.alive(worker) and t - first <= self.max_claim:
@@ -357,7 +498,7 @@ class Reaper:
         # are handled above or by the coordinator): delete them so they do not pile up.
         for sub in ("workers", "locks"):
             for p in (self.root / sub).glob(f"*{CONFLICT}*"):
-                p.unlink(missing_ok=True)
+                rm(p)
         return out
 
 
@@ -403,7 +544,7 @@ def strip(res: dict) -> dict:
 class Coordinator:
     """One per trainer process. `name` must be unique among coordinators sharing a root (default: host)."""
 
-    def __init__(self, root, name=None, batch=BATCH, lease=LEASE, poll=0.5, min_steal=5.0):
+    def __init__(self, root, name=None, batch=BATCH, lease=LEASE, poll=0.5, min_steal=MIN_STEAL):
         self.root = ensure(root)
         self.name = name or os.environ.get("BC_DIST_NAME") or socket.gethostname().lower()
         self.worker = f"{self.name}-local"
@@ -438,7 +579,7 @@ class Coordinator:
                     w = r.get("worker", "?")
                     self.stats["by_worker"][w] = self.stats["by_worker"].get(w, 0) + 1
                 cache_put(res)
-            p.unlink(missing_ok=True)
+            rm(p)
         return got
 
     def tidy(self):
@@ -446,7 +587,7 @@ class Coordinator:
         for p in queued(self.root):
             t = read_json(p)
             if t and t.get("coord") == self.name and all(cached(g["key"]) for g in t["games"]):
-                p.unlink(missing_ok=True)
+                rm(p)
 
     def make_tasks(self, games, keys):
         """Batches of the uncached, shippable games (one entry per distinct key). Returns [task]."""
@@ -476,7 +617,11 @@ class Coordinator:
             tasks.append(t)
         return tasks
 
-    def play_many(self, games, jobs=arena.DEFAULT_JOBS, progress=False):
+    def play_many(self, games, jobs=arena.DEFAULT_JOBS, progress=False, player=None):
+        """`player` (a SlotPlayer) plays the local share when games contain BlobBots: local thread i uses
+        its pair i, so jobs is capped at player.jobs."""
+        if player is not None:
+            jobs = max(1, min(jobs, player.jobs))
         (arena.ARENA / "tmp").mkdir(parents=True, exist_ok=True)
         games = [(a, b, arena.resolve_map(m) if not isinstance(m, Path) else m) for a, b, m in games]
         keys = [game_key(*g) for g in games]
@@ -499,13 +644,13 @@ class Coordinator:
         local = [k for k in by_key if k not in shipped and k not in done]
         busy, stop, failures = set(), threading.Event(), []
 
-        def play_local(k, stolen=False):
+        def play_local(k, i, stolen=False):
             with lock:
                 if k in done or k in busy:
                     return
                 busy.add(k)
             try:
-                r = arena.play(*by_key[k])
+                r = player.play(*by_key[k], i) if player is not None else arena.play(*by_key[k])
             except BaseException as e:      # surface it in the caller, like arena.play_many would
                 with lock:
                     busy.discard(k)
@@ -524,12 +669,12 @@ class Coordinator:
         def accept(t):
             return t["id"] in mine
 
-        def worker_loop():
+        def worker_loop(i):
             while not stop.is_set():
                 with lock:
                     k = local.pop() if local else None
                 if k is not None:
-                    play_local(k)
+                    play_local(k, i)
                     continue
                 t = claim(self.root, self.worker, accept)
                 if t is None:
@@ -539,7 +684,7 @@ class Coordinator:
                     continue
                 t0 = time.time()
                 for g in t["games"]:
-                    play_local(g["key"], stolen=bool(t.get("stolen")))
+                    play_local(g["key"], i, stolen=bool(t.get("stolen")))
                 with lock:
                     res = {g["key"]: strip(done[g["key"]]) for g in t["games"] if g["key"] in done}
                 if len(res) == len(t["games"]) and (self.root / "claimed" / claim_name(t["id"], self.worker)).exists():
@@ -549,7 +694,7 @@ class Coordinator:
                 self.hb.add(tasks=1)
 
         self.hb.beat(state="busy", jobs=jobs)
-        threads = [threading.Thread(target=worker_loop, daemon=True) for _ in range(max(1, jobs))]
+        threads = [threading.Thread(target=worker_loop, args=(i,), daemon=True) for i in range(max(1, jobs))]
         for th in threads:
             th.start()
         retried, last, t_start = set(), -1, time.time()

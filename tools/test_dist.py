@@ -568,5 +568,134 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(w.hb.info["games"], 6)
 
 
+class VirtualBotTests(unittest.TestCase):
+    """BlobBots (whole-generation batching): same bytes and hashes as neat_train.patch, slot reuse, specs."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = dist.ensure(self.tmp / "dist")
+        import neat_train as nt
+        self.nt = nt
+        prog = [1, nt.NF, 0, 0x3F800000, 0x3F800000, 2, 0, 0x3F000000, 5, 0xBF000000, nt.NF]
+        self.blobs = [nt.blob({}, 800), nt.blob({r: prog for r in range(12)}, 800), nt.blob({3: prog}, 500),
+                      nt.blob({r: prog + [0] * 7 for r in (0, 5)}, 800)]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    fake_build = BlobTests.fake_build
+
+    def files(self, slot):
+        return [(slot / ".cambc" / "build" / n).read_bytes() for n in dist.WASMS]
+
+    def test_virtual_bot_equals_patch(self):
+        ref = self.fake_build(self.tmp / "ref")
+        before = self.files(ref)
+        for i, blob in enumerate(self.blobs):
+            v = dist.virtual_bot(ref, blob, f"v{i}")
+            slot = self.fake_build(self.tmp / f"p{i}")
+            real = self.nt.patch(slot, blob, "p")
+            self.assertEqual(v.hash, real.hash)
+            z = dist._bases[v.base]
+            self.assertEqual(list(dist.apply_blob(z, v.blob)), self.files(slot))
+        self.assertEqual(self.files(ref), before)          # the reference slot is never written
+
+    def test_slot_player_writes_in_place_and_reuses(self):
+        ref = self.fake_build(self.tmp / "ref")
+        bots = [dist.virtual_bot(ref, b, f"v{i}") for i, b in enumerate(self.blobs)]
+        slots = [self.fake_build(self.tmp / f"s{i}") for i in range(2)]
+        other = self.fake_build(self.tmp / "o0", salt=b"another build")   # pair 1 starts as a foreign build
+        player = dist.SlotPlayer([slots[0], slots[1], other, self.fake_build(self.tmp / "o1", salt=b"x")])
+        for slot in (slots[0], other):
+            for bot in bots + bots[::-1] + [bots[1], bots[1]]:
+                got = player.materialise(bot, slot)
+                self.assertEqual(got.hash, bot.hash)
+                self.assertEqual(arena.sha(slot / ".cambc" / "build" / dist.WASMS[1]), bot.hash)
+                self.assertEqual(self.files(slot), list(dist.apply_blob(dist._bases[bot.base], bot.blob)))
+        plain = arena.Bot("plain", self.tmp / "plain", "p" * 16)
+        self.assertIs(player.materialise(plain, slots[1]), plain)
+
+    def test_spec_and_published_base_rebuild_the_bot(self):
+        ref = self.fake_build(self.tmp / "ref")
+        bot = dist.virtual_bot(ref, self.blobs[1], "v")
+        spec = dist.bot_spec(bot)
+        self.assertEqual((spec["kind"], spec["base"], spec["hash"]), ("blob", bot.base, bot.hash))
+        dist.publish_base(self.root, bot, spec["base"])
+        w = dist_worker.Worker(self.root, "w", jobs=1, adopt_base=True)
+        w.version, w.bases = "v", {}
+        got = w.materialise(bot.hash, spec, self.fake_build(self.tmp / "wslot", salt=b"other compiler"))
+        self.assertEqual(got.hash, bot.hash)
+
+    def test_play_slots_local_threads_see_their_own_bot(self):
+        """Concurrent local play: at the moment each game starts, both slot files hold that game's bots."""
+        ref = self.fake_build(self.tmp / "ref")
+        bots = [dist.virtual_bot(ref, b, f"v{i}") for i, b in enumerate(self.blobs)]
+        slots = [self.fake_build(self.tmp / f"s{i}") for i in range(6)]
+        maps = []
+        for i in range(3):
+            m = self.tmp / f"map{i}.map26a"
+            m.write_bytes(bytes([i]) * 50)
+            maps.append(m)
+        games = [(x, y, m) for x in bots for y in bots for m in maps]
+        seen, lock = [], threading.Lock()
+
+        def fake_play(a, b, m, keep_replay=None):
+            for bot in (a, b):
+                self.assertEqual(arena.sha(Path(bot.path) / ".cambc" / "build" / dist.WASMS[1]), bot.hash)
+            time.sleep(0.003)
+            with lock:
+                seen.append((a.hash, b.hash))
+            key = dist.game_key(a, b, m)
+            return {**fake_result(key), "a": a.name, "b": b.name, "cached": False}
+        arena_dir = self.tmp / "arena"
+        (arena_dir / "tmp").mkdir(parents=True)
+        with mock.patch.object(arena, "play", fake_play), mock.patch.object(arena, "ARENA", arena_dir), \
+                mock.patch.object(arena, "CACHE", arena_dir / "r.jsonl"), mock.patch.object(arena, "_cache", {}):
+            out = dist.play_slots(games, 8, slots, root="")
+        self.assertEqual(len(seen), len(games))
+        self.assertEqual([r["key"] for r in out], [dist.game_key(*g) for g in games])
+        self.assertEqual([(r["a"], r["b"]) for r in out], [(a.name, b.name) for a, b, _ in games])
+
+
+class BatchCoordinator(EngineCase):
+    """Coordinator.play_many with a SlotPlayer-like player: local threads get distinct pair indices, remote
+    workers share the batch, and results match plain local play."""
+
+    class Player:
+        def __init__(self, jobs, play):
+            self.jobs, self._play, self.used = jobs, play, set()
+
+        def play(self, a, b, m, i):
+            assert 0 <= i < self.jobs, i
+            self.used.add(i)
+            return self._play(a, b, m)
+
+    def test_player_without_workers_matches_local(self):
+        want = self.local()
+        pl = self.Player(3, self.fake_play)
+        got = dist.coordinator(self.root).play_many(self.games, 8, player=pl)   # jobs capped at pl.jobs
+        self.assertEqual(self.norm(got), self.norm(want))
+        self.assertTrue(pl.used and max(pl.used) < 3)
+
+    def test_player_with_remote_workers(self):
+        want = self.local()
+        dist.ensure(self.root)
+        stop = threading.Event()
+        ws = [threading.Thread(target=self.remote_worker, args=(f"w{i}", stop), daemon=True) for i in range(2)]
+        for w in ws:
+            w.start()
+        try:
+            got = dist.coordinator(self.root).play_many(self.games, 2, player=self.Player(2, self.fake_play))
+        finally:
+            stop.set()
+            for w in ws:
+                w.join()
+        self.assertEqual(self.norm(got), self.norm(want))
+        self.assertEqual(list((self.root / "queue").glob("*.json")), [])
+
+    def test_steal_floor_default(self):
+        self.assertGreaterEqual(dist.Coordinator(self.root).min_steal, 60)
+
+
 if __name__ == "__main__":
     unittest.main()

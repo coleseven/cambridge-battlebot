@@ -586,6 +586,9 @@ class Coordinator:
             for tid in mine:
                 for p in (self.root / "claimed").glob(f"{tid}@{self.worker}.json"):
                     release(self.root, self.worker, tid)
+            # Final sweep: results our own threads wrote after the loop's last ingest (seen on Windows,
+            # where play_many returned with its local tasks' results/<id>.json still on disk).
+            self.ingest()
             self.hb.beat(state="idle")
         self.last = {s: sum(v == s for v in src.values()) for s in ("cached", "local", "remote")}
         for s_, n_ in self.last.items():

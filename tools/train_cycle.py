@@ -43,8 +43,10 @@ def main():
     ap.add_argument("--lam", type=int, default=0, help="CGP children per island (0 = trainer default)")
     ap.add_argument("--pairings", type=int, default=5)
     ap.add_argument("--duels", type=int, default=2)
+    ap.add_argument("--dist", default="", help="shared dist folder for tools/dist_worker.py workers (default off)")
     a = ap.parse_args()
     common = ["--gens", str(a.block), "--seed-from", a.seed_from, "--jobs", str(a.jobs), "--slots", str(a.slots)]
+    common += ["--dist", a.dist] if a.dist else []
     extra = {"tools/neat_train.py": [], "tools/cgp_train.py": []}
     if a.team_size > 1:
         nv = ["--team-size", str(a.team_size), "--pairings", str(a.pairings), "--duels", str(a.duels)]
@@ -67,7 +69,8 @@ def main():
         if a.neat and a.cgp:
             # Refresh the per-hero champion set both trainers use as their evolving opponents.
             step(["tools/champions.py", "--neat", a.neat, "--cgp", a.cgp, "--jobs", str(a.jobs),
-                  *(["--team-size", str(a.team_size)] if a.team_size > 1 else [])])
+                  *(["--team-size", str(a.team_size)] if a.team_size > 1 else []),
+                  *(["--dist", a.dist] if a.dist else [])])
 
 
 if __name__ == "__main__":

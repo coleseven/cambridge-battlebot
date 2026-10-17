@@ -482,10 +482,17 @@ def export(a):
     d = OUT / a.name
     st = load_state(d / "state.pkl")
     out = {PICKS[p]: program(g, st["pops"][p].config) for p, g in st["elites"].items()}
+    data = json.dumps({"gen": st["gen"], "nf": NF, "team_size": st.get("team_size", 1), "programs": out})
     tmp = d / "elites.tmp"
-    tmp.write_text(json.dumps({"gen": st["gen"], "nf": NF, "team_size": st.get("team_size", 1), "programs": out}))
+    tmp.write_text(data)
     tmp.replace(d / "elites.json")
-    print(f"gen {st['gen']}: wrote {d / 'elites.json'}")
+    # Keep every export: tools/progress.py scores these snapshots against fixed opponents (a progress curve).
+    snap = d / "snapshots" / f"gen{st['gen']:04d}.json"
+    snap.parent.mkdir(exist_ok=True)
+    if not snap.exists():
+        tmp.write_text(data)
+        tmp.replace(snap)
+    print(f"gen {st['gen']}: wrote {d / 'elites.json'} (+ snapshots/{snap.name})")
 
 
 def main():

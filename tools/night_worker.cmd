@@ -8,5 +8,7 @@ cd /d "%~dp0.."
 if not exist .arena\dist mkdir .arena\dist
 echo === %date% %time% night worker start >> .arena\dist-night.log
 git pull -q --ff-only origin main >> .arena\dist-night.log 2>&1
+rem Progress curve first (~minutes; snapshots already scored are cached): new NEAT snapshots vs fixed opponents.
+.venv\Scripts\python -u tools\progress.py n2v2 --jobs 12 >> .arena\progress-night.log 2>&1
 .venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
 echo === %date% %time% night worker exit %errorlevel% >> .arena\dist-night.log

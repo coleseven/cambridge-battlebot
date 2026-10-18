@@ -352,7 +352,7 @@ def run_nvn(a):
         team_progs = {q: champs.get(q) or program(st["elites"][q], st["pops"][q].config) for q in ROWS}
         elite_bot = patch(elite_slot, nvn.team_blob(sys.modules[__name__], team_progs, a.resign), "elite")
         summary = {}
-        scheds = {p: nvn.schedule(n, gen, p, a.pairings, a.duels) for p in st["pops"]}
+        scheds = {p: nvn.schedule(n, gen, p, a.pairings, a.duels, mid=a.retain) for p in st["pops"]}
         pre = {}
         if not a.per_hero:
             # Whole generation in one batch: every hero's genomes, in the order pop.run will pass them.

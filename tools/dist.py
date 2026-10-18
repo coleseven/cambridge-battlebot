@@ -664,7 +664,11 @@ class Coordinator:
         tasks = self.make_tasks(games, keys)
         remotes = self.remotes()
         kept = []
-        if remotes and tasks:
+        if not remotes:
+            # Nobody to share with: play everything directly. Queueing anyway cost the solo training PC
+            # ~30% (17-18 Oct: ~1,260 s vs ~950 s per generation) in task/result files and Syncthing churn.
+            kept, tasks = tasks, []
+        elif tasks:
             # Keep our throughput share as plain local games (never queued), spread over the call's tasks.
             f = self.local_share(jobs, remotes)
             n_keep = min(len(tasks), round(f * len(tasks)))
@@ -789,6 +793,7 @@ class Coordinator:
             # Final sweep: results our own threads wrote after the loop's last ingest (seen on Windows,
             # where play_many returned with its local tasks' results/<id>.json still on disk).
             self.ingest()
+            self.tidy()      # our queued tasks whose games are now all cached (e.g. left from before a restart)
             try:
                 write_json(self.speed_file, self.speeds)
             except OSError:

@@ -43,6 +43,7 @@ def main():
     ap.add_argument("--lam", type=int, default=0, help="CGP children per island (0 = trainer default)")
     ap.add_argument("--pairings", type=int, default=5)
     ap.add_argument("--duels", type=int, default=2)
+    ap.add_argument("--retain", type=int, default=0, help="N>2: retention pairings at each smaller team size")
     ap.add_argument("--dist", default="", help="shared dist folder for tools/dist_worker.py workers (default off)")
     ap.add_argument("--freeze-cgp", action="store_true",
                     help="don't train CGP (its elites stay frozen); the champion refresh still compares against them")
@@ -51,7 +52,8 @@ def main():
     common += ["--dist", a.dist] if a.dist else []
     extra = {"tools/neat_train.py": [], "tools/cgp_train.py": []}
     if a.team_size > 1:
-        nv = ["--team-size", str(a.team_size), "--pairings", str(a.pairings), "--duels", str(a.duels)]
+        nv = ["--team-size", str(a.team_size), "--pairings", str(a.pairings), "--duels", str(a.duels),
+              "--retain", str(a.retain)]
         nv += ["--warm-arena", a.warm_arena] if a.warm_arena else []
         extra["tools/neat_train.py"] = nv + ["--warm-run", a.warm_neat] + (["--pop", str(a.pop)] if a.pop else [])
         extra["tools/cgp_train.py"] = (nv + ["--warm-run", a.warm_cgp] + (["--islands", str(a.islands)] if a.islands else [])

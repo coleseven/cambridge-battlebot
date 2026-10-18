@@ -125,10 +125,15 @@ def champions_file(n: int) -> Path:
 
 
 def champion_set(n: int, warm_arena: Path | None = None):
-    """Evolving N-v-N champion set: champions/current_<N>v<N>.json, else the 1v1 set (here, then in
-    warm_arena). Returns {pick: words} or {} (hand prior)."""
-    for p in [champions_file(n), champions_file(1)] + ([Path(warm_arena) / "champions" / "current.json"]
-                                                       if warm_arena else []):
+    """Evolving N-v-N champion set: champions/current_<N>v<N>.json, else the next smaller team size's set
+    down to 1v1 (so a new 3v3 run starts from the 2v2 champions), each looked up here, then in warm_arena.
+    Returns {pick: words} or {} (hand prior)."""
+    cands = []
+    for k in range(n, 0, -1):
+        cands.append(champions_file(k))
+        if warm_arena:
+            cands.append(Path(warm_arena) / "champions" / champions_file(k).name)
+    for p in cands:
         if p.exists():
             return load_programs(p)
     return {}
@@ -144,9 +149,11 @@ def team_blob(nt, progs: dict, resign: int, hero=None, prog=None):
 
 
 # ---------------------------------------------------------------- schedule and evaluation
-def schedule(n: int, gen: int, hero: int, k2: int, k1: int, seed: int = 0):
+def schedule(n: int, gen: int, hero: int, k2: int, k1: int, seed: int = 0, mid: int = 0):
     """Matchups for hero `hero` in generation `gen`: list of (size, layout, own_team, opp_team, opp_kind)
-    with opp_kind 'elite' or 'anchor'. Each is played in both seats."""
+    with opp_kind 'elite' or 'anchor'. Each is played in both seats. `mid` adds that many retention
+    pairings at every team size between 1 and N (e.g. 2v2 games in a 3v3 run); they are drawn after
+    everything else, so mid=0 gives exactly the old schedule."""
     rng = random.Random(f"{seed}:{gen}:{hero}:{n}")
     out = []
     others = [q for q in range(len(PICKS)) if q != hero]
@@ -160,6 +167,11 @@ def schedule(n: int, gen: int, hero: int, k2: int, k1: int, seed: int = 0):
         layout = rng.choice(LAYOUTS)
         for j, q in enumerate(rng.sample(range(len(PICKS)), k1)):
             out.append((1, layout, (hero,), (q,), "elite" if j < (k1 + 1) // 2 else "anchor"))
+    for s in range(2, n):
+        for j in range(mid):
+            own = tuple(sorted([hero] + rng.sample(others, s - 1)))
+            opp = tuple(sorted(rng.sample(range(len(PICKS)), s)))
+            out.append((s, rng.choice(LAYOUTS), own, opp, "elite" if j < (mid + 1) // 2 else "anchor"))
     return out
 
 
@@ -243,6 +255,8 @@ def add_args(r):
     r.add_argument("--team-size", type=int, default=1, help="N for N-v-N training (1 = the duel trainer)")
     r.add_argument("--pairings", type=int, default=5, help="N-v-N team pairings per hero per generation")
     r.add_argument("--duels", type=int, default=2, help="1v1 retention duels per hero per generation (N>1)")
+    r.add_argument("--retain", type=int, default=0, help="N>2: retention pairings per hero at each team size "
+                   "between 1 and N (e.g. 2v2 games in a 3v3 run)")
     r.add_argument("--warm-run", default="", help="N>1: warm-start from this 1v1 run (same trainer kind)")
     r.add_argument("--per-hero", action="store_true", help="N>1: evaluate hero by hero in slot-sized groups "
                    "(the pre-17-Oct path) instead of the whole generation in one batch")

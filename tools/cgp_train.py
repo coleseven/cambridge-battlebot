@@ -206,7 +206,7 @@ def run_nvn(a):
         summary = {}
         scheds, cands_of = {}, {}
         for p, islands in st["islands"].items():         # mutate every hero first: same rng order as before
-            scheds[p] = nvn.schedule(n, gen, p, a.pairings, a.duels, seed=1)
+            scheds[p] = nvn.schedule(n, gen, p, a.pairings, a.duels, seed=1, mid=a.retain)
             cands = []                                   # (island, genome); parent first per island
             for i, isl in enumerate(islands):
                 cands.append((i, isl["g"]))

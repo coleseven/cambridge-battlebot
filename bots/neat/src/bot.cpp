@@ -4,6 +4,7 @@
 #include "bot.h"
 #include "weights.h"
 #include "genome.h"
+#include "budget.h"
 #include <cstring>
 #include <algorithm>
 #include <array>
@@ -55,6 +56,16 @@ std::unique_ptr<c::distance_field> field_to(const c::bitboard& roots) {
     c::bitboard visited;
     f->compute(S.terrain & ~roots, roots, visited);
     return f;
+}
+
+// The champion record (position, health, strength, focus, range, state flags) in ONE host query. Every
+// cambc::champion getter re-fetches this same record; reading it once gives identical values for less fuel.
+// Returns false when the champion is not in vision (what champion::is_visible() checks via the same query).
+bool read_record(const c::champion& ch, c::detail::champion_info& out) {
+    const auto code = c::detail::sdk_champion(static_cast<std::uint32_t>(static_cast<c::handle_champion_t>(ch)), &out);
+    if (code == 97) return false;   // api_not_in_vision
+    c::detail::check(code);
+    return true;
 }
 
 // ---- learned network (NEAT phenotype from the patchable genome block) ----
@@ -232,13 +243,18 @@ void play() {
     auto& me = c::self();
     if (RESIGN_ROUND && S.team_a && c::round_number() >= RESIGN_ROUND) c::resign();  // end the duel early
     if (!me.is_alive()) return;
-    if (me.is_recalling() || me.is_submitting_gems() || me.is_teleporting()) return;
+    // One host query for our whole record instead of one per getter (each getter re-fetches it); same values.
+    c::detail::champion_info my_inf{};
+    read_record(me, my_inf);
+    const auto my_state = c::champion_state::from_bits_retain(my_inf.state);
+    if (my_state.contains(c::champion_state::recalling) || my_state.contains(c::champion_state::submitting_gems) ||
+        my_state.contains(c::champion_state::teleporting)) return;
 
-    const vec2 pos = me.position();
-    const float my_hp = me.health(), my_max = std::max(1.0f, me.max_health());
+    const vec2 pos{my_inf.x, my_inf.y};
+    const float my_hp = my_inf.health, my_max = std::max(1.0f, my_inf.max_health);
     const float my_frac = my_hp / my_max;
-    const float my_str = me.strength();
-    const int my_range = me.attack_range();
+    const float my_str = my_inf.strength;
+    const int my_range = my_inf.attack_range;
     const int round = static_cast<int>(c::round_number());
 
     auto blocked = S.terrain | c::vision::champion_tiles() | c::vision::camp_tiles();
@@ -250,9 +266,13 @@ void play() {
     std::vector<Foe> foes;
     for (const auto& e : raw) {
         try {
-            if (!e.is_visible() || !e.is_alive()) continue;
-            Foe f{&e, e.position(), e.health(), std::max(1.0f, e.max_health()), e.strength() + 0.25f * e.focus(),
-                  e.attack_range() + 1, e.buffs().has_stun(), e.is_submitting_gems() || e.is_recalling()};
+            // is_visible() == the record query succeeds with x, y >= 0; then read every field from that record.
+            c::detail::champion_info inf{};
+            if (!read_record(e, inf) || inf.x < 0 || inf.y < 0 || !e.is_alive()) continue;
+            const auto st = c::champion_state::from_bits_retain(inf.state);
+            Foe f{&e, vec2{inf.x, inf.y}, inf.health, std::max(1.0f, inf.max_health), inf.strength + 0.25f * inf.focus,
+                  inf.attack_range + 1, e.buffs().has_stun(),
+                  st.contains(c::champion_state::submitting_gems) || st.contains(c::champion_state::recalling)};
             if (f.stunned) f.dps *= 0.3f;
             foes.push_back(f);
         } catch (const std::exception&) {}
@@ -267,9 +287,13 @@ void play() {
         if (!tiles.is_empty())
             for (const auto& e : c::vision::champions(team::ally)) {
                 try {
-                    if (!e.is_alive() || e.position() == pos) continue;
-                    ALLIES.push_back(Ally{e.position(), e.health() / std::max(1.0f, e.max_health()),
-                                          static_cast<int>(e.attack_range())});
+                    if (!e.is_alive()) continue;
+                    c::detail::champion_info inf{};                // one record query (same values as the getters);
+                    if (!read_record(e, inf)) continue;            // the getter would have thrown: skip, as before
+                    const vec2 ap{inf.x, inf.y};
+                    if (ap == pos) continue;
+                    ALLIES.push_back(Ally{ap, inf.health / std::max(1.0f, inf.max_health),
+                                          static_cast<int>(inf.attack_range)});
                 } catch (const std::exception&) {}
             }
     }
@@ -293,16 +317,12 @@ void play() {
             }
             if (keep) live = live | S.group_tiles[i];
         }
-        if constexpr (TEAM) {
-            // Team path only (the duel path stays byte-for-byte as before): rebuild the objective field
-            // only when the set of live groups changes; it is the largest per-turn fuel cost in a crowd.
-            if (!S.objective_ok || !(live == S.objective_live)) {
-                S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
-                S.objective_live = live;
-                S.objective_ok = true;
-            }
-        } else {
+        // Rebuild the objective field only when the set of live groups changes (a full field is ~6k fuel,
+        // far more on big maps); the cached field is identical, so games are unchanged.
+        if (!S.objective_ok || !(live == S.objective_live)) {
             S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+            S.objective_live = live;
+            S.objective_ok = true;
         }
     }
     vec2 bank_altar{-1, -1};
@@ -319,7 +339,7 @@ void play() {
     // ---- spells ----
     std::vector<Spell> spells;
     int ready_count = 0;
-    if (me.can_cast()) {
+    if (my_state.contains(c::champion_state::can_cast)) {
         const auto abs = me.abilities();
         for (const auto& ab : abs) {
             if (!ab.info()) continue;
@@ -339,21 +359,27 @@ void play() {
     const auto& W = WEIGHTS[std::clamp(S.type, 0, 11)];
     const int home_now = fv(*S.home, pos);
     std::vector<Opt> opts;
+    opts.reserve(40);
     auto add = [&](vec2 dest, int spell, int target, bool atk) { opts.push_back(Opt{dest, spell, target, atk}); };
+    // Per-turn constants hoisted out of the destination loop (host calls; same values every iteration).
+    const bool can_move = my_state.contains(c::champion_state::can_move), can_attack = my_state.contains(c::champion_state::can_attack);
+    std::vector<vec2> camp_pos;
+    camp_pos.reserve(camps.size());
+    for (const auto& cm : camps) camp_pos.push_back(cm.spawn_position());
     for (std::size_t mi = 0; mi < MOVES.size(); ++mi) {
         const vec2 q{pos.x + MOVES[mi].x, pos.y + MOVES[mi].y};
         const bool stay = mi == 0;
-        if (!stay && (!me.can_move() || !inb(q) || blocked.is_set(q))) continue;
+        if (!stay && (!can_move || !inb(q) || blocked.is_set(q))) continue;
         // Best attackable foe from q (lowest health).
         int atk_t = -1;
-        if (me.can_attack() && (stay || !S.ranged))
+        if (can_attack && (stay || !S.ranged))
             for (int i = 0; i < static_cast<int>(foes.size()); ++i)
                 if (cheb(q, foes[i].pos) <= my_range && (atk_t < 0 || foes[i].hp < foes[atk_t].hp)) atk_t = i;
         add(q, -1, atk_t, atk_t >= 0);
         if (atk_t >= 0) add(q, -1, -1, false);  // also allow holding the attack
-        if (me.can_attack() && (stay || !S.ranged))
+        if (can_attack && (stay || !S.ranged))
             for (int ci = 0; ci < static_cast<int>(camps.size()); ++ci)
-                if (cheb(q, camps[ci].spawn_position()) <= my_range) {
+                if (cheb(q, camp_pos[ci]) <= my_range) {
                     Opt o{q, -1, -1, true};
                     o.camp = ci;
                     opts.push_back(o);
@@ -385,8 +411,48 @@ void play() {
     }
 
     Opt* best = nullptr;
+    // Values that depend only on the destination tile or only on the target are computed once per turn
+    // (several options share a destination: attack / hold / spells). Same numbers in the same order as
+    // computing them per option, so the scores and games are unchanged; it only saves fuel (budget.h).
+    const int obj_now = fv(*S.objective, pos), alt_now = fv(*S.altar, pos);
+    struct DestInfo { vec2 q; float threat; int home_q, obj_q, alt_q; float ally_d, ally_frac; };
+    std::vector<DestInfo> dcache;
+    auto dest_info = [&](vec2 q) -> const DestInfo& {
+        for (const auto& d : dcache) if (d.q == q) return d;
+        DestInfo d{q, 0.0f, fv(*S.home, q), fv(*S.objective, q), fv(*S.altar, q), 0.0f, 0.0f};
+        for (const auto& e : foes) if (cheb(q, e.pos) <= e.reach) d.threat += e.dps;
+        d.threat /= my_max;
+        if constexpr (TEAM) {
+            int best_ad = 1 << 20;
+            for (const auto& al : allies) {
+                const int ad = cheb(q, al.pos);
+                if (ad < best_ad) { best_ad = ad; d.ally_d = ad / 10.0f; d.ally_frac = al.frac; }
+            }
+        }
+        dcache.push_back(d);
+        return dcache.back();
+    };
+    struct TargetInfo { float on_target, near_target, near_foes; };
+    std::vector<TargetInfo> tcache;
+    if constexpr (TEAM) {
+        if (!foes.empty()) {
+            for (int ti = 0; ti < static_cast<int>(foes.size()); ++ti) {
+                const Foe& f = foes[ti];
+                TargetInfo t{0, 0, 0};
+                for (const auto& al : allies) {
+                    if (cheb(al.pos, f.pos) <= al.range) t.on_target += 1;
+                    if (cheb(al.pos, f.pos) <= 3) t.near_target += 1;
+                }
+                for (int i = 0; i < static_cast<int>(foes.size()); ++i)
+                    if (i != ti && cheb(foes[i].pos, f.pos) <= 3) t.near_foes += 1;
+                tcache.push_back(t);
+            }
+        }
+    }
+    dcache.reserve(16);
     for (auto& o : opts) {
         const vec2 q = o.dest;
+        const DestInfo& di = dest_info(q);
         const Spell* sp = o.spell >= 0 ? &spells[o.spell] : nullptr;
         const bool has_foe = !foes.empty();
         const int ti = o.target >= 0 ? o.target : 0;
@@ -397,11 +463,9 @@ void play() {
         float dmg = (o.atk && o.camp < 0 && has_foe) ? my_str : 0.0f;
         if (sp && sp->offensive) dmg += sp->amount;
         if (sp && sp->reset && o.atk && o.camp < 0) dmg += my_str;
-        float threat = 0;
-        for (const auto& e : foes) if (cheb(q, e.pos) <= e.reach) threat += e.dps;
-        threat /= my_max;
+        const float threat = di.threat;
         const float stun = (sp && sp->offensive && sp->stun) ? 1.0f : 0.0f;
-        const int home_q = fv(*S.home, q);
+        const int home_q = di.home_q;
         float x[NX] = {
             dmg / f.maxhp,
             dmg >= f.hp ? 1.0f : 0.0f,
@@ -424,24 +488,17 @@ void play() {
             (1 - my_frac) * static_cast<float>(home_now - home_q),
             (f.channel ? 1.0f : 0.0f) * stun,
             o.camp >= 0 ? 1.0f : 0.0f,
-            static_cast<float>(fv(*S.objective, pos) - fv(*S.objective, q)),
+            static_cast<float>(obj_now - di.obj_q),
             o.bank ? 1.0f : 0.0f,
             gems / 50.0f * threat,
-            gems / 50.0f * static_cast<float>(fv(*S.altar, pos) - fv(*S.altar, q)),
+            gems / 50.0f * static_cast<float>(alt_now - di.alt_q),
         };
         if constexpr (TEAM) {
             // Team features: allies on the target, nearest ally, local counts around the target.
-            float on_target = 0, near_target = 0, near_foes = 0, ally_d = 0, ally_frac = 0;
-            int best_ad = 1 << 20;
-            for (const auto& al : allies) {
-                if (has_foe && cheb(al.pos, f.pos) <= al.range) on_target += 1;
-                if (has_foe && cheb(al.pos, f.pos) <= 3) near_target += 1;
-                const int ad = cheb(q, al.pos);
-                if (ad < best_ad) { best_ad = ad; ally_d = ad / 10.0f; ally_frac = al.frac; }
-            }
-            if (has_foe)
-                for (int i = 0; i < static_cast<int>(foes.size()); ++i)
-                    if (i != ti && cheb(foes[i].pos, f.pos) <= 3) near_foes += 1;
+            const float on_target = has_foe ? tcache[ti].on_target : 0.0f;
+            const float near_target = has_foe ? tcache[ti].near_target : 0.0f;
+            const float near_foes = has_foe ? tcache[ti].near_foes : 0.0f;
+            const float ally_d = di.ally_d, ally_frac = di.ally_frac;
             const bool hits = dmg > 0;
             x[NF_V1 + 0] = hits ? on_target : 0.0f;
             x[NF_V1 + 1] = ally_d;
@@ -463,14 +520,14 @@ void play() {
     std::stable_sort(order.begin(), order.end(), [](const Opt* a, const Opt* b) { return a->score > b->score; });
     if (!order.empty()) best = order[0];
     if (NET.ok) {
-        constexpr std::size_t NET_TOP_K = 12;
-        constexpr std::uint64_t NET_FUEL_CAP = 35000;
+        // Fixed work: always re-rank exactly the top budget::NET_TOP_K options, so the choice never depends on
+        // how much fuel is left (budget.h). Fuel is checked once, as an emergency brake that cannot fire when
+        // the fighter has the turn to itself (training) and only fires in a full bot that overspent elsewhere.
         const auto f0 = c::fuel_remaining();
         Opt* net_best = nullptr;
         float net_best_s = 0;
-        bool complete = true;
-        for (std::size_t i = 0; i < order.size() && i < NET_TOP_K; ++i) {
-            if (f0 - c::fuel_remaining() > NET_FUEL_CAP || c::fuel_remaining() < (TEAM ? 20000u : 15000u)) { complete = false; break; }
+        const bool complete = f0 >= budget::NET_EMERGENCY_FLOOR;
+        for (std::size_t i = 0; complete && i < order.size() && i < budget::NET_TOP_K; ++i) {
             const float v = run_net<NX>(order[i]->x.data());
             if (!net_best || v > net_best_s) { net_best = order[i]; net_best_s = v; }
         }

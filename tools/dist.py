@@ -821,11 +821,21 @@ class Coordinator:
         steal_after(): a slow or vanished worker cannot stretch the tail of a generation much beyond local
         speed. Every game is checked again before it is played; the first result in wins (they are equal)."""
         t_now, wait = self.reaper.clock(), self.steal_after()
+        claimed = set()
         for p in sorted((self.root / "claimed").glob("*.json")):
             tid, worker = parse_claim(p.name)
+            claimed.add(tid)
             first = self.reaper.claims.get(p.name)
             if tid in mine and worker != self.worker and first is not None and t_now - first > wait:
                 t = mine[tid]
+                with lock:
+                    if any(g["key"] not in done and g["key"] not in busy for g in t["games"]):
+                        return {**t, "stolen": True}
+        # Orphans: tasks of this call that are neither queued (claim() just found none) nor visibly claimed.
+        # 19 Oct 02:15: the training PC dropped off mid-sync, so its claim's rename deleted our queue file but
+        # the claimed file never arrived (only a ~syncthing~ .tmp); the generation then waited 9.5 hours.
+        for tid, t in mine.items():
+            if tid not in claimed and time.time() - self.created.get(tid, 0.0) > wait:
                 with lock:
                     if any(g["key"] not in done and g["key"] not in busy for g in t["games"]):
                         return {**t, "stolen": True}

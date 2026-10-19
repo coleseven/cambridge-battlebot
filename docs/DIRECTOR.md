@@ -83,6 +83,40 @@ Findings:
   - Ren's and C&I's are worse.
 - **Noise.** Single-parameter changes swing ±0.05–0.1 on 17 maps, so judge on all 57 (342 games per bot).
 
+## Shared training: networks and director params on the same games
+
+From 19 Oct the nightly real-map run trains both on the same games:
+
+    .venv/Scripts/python tools/team_bot.py --macro-src bots/director/src --source neat:real1 --out team-director-train \
+        --set NN_HEROES=4095 --runtime-params tools/space-director.json --build
+    .venv/Scripts/python tools/real_train.py run real2 --warm-run real1 --team team-director-train \
+        --cma tools/space-director.json [--cma-pop 8 --cma-sigma 0.08 --cma-cap 0.25]
+
+**Params without rebuilding.** `--runtime-params` turns the space's params from `constexpr` into `inline`
+variables. A generated `params_runtime.h` loads them at start-up from a `'PRMS'` block in the genome blob (word
+16008, after the draft block), so each game patches a director candidate in like a network.
+`tools/check_runtime_params.py` checks two things:
+- no block plays exactly like the compiled defaults (16/16 games);
+- a block with values V plays exactly like a build compiled with V (16/16 games).
+
+**Balanced assignment.** Each generation CMA-ES asks 8 candidates.
+- The 66 (hero, schedule slot) cells are shuffled and dealt to them round-robin.
+- All 16 network candidates of a hero play a given cell with the same director candidate. The network ranking
+  within a hero therefore keeps its common random numbers.
+- Each director candidate gets ~130 games per generation, spread over heroes, maps and opponents. A
+  separate CMA-ES run gives each candidate 102 games and needs its own compute.
+
+**Fitness and limits.**
+- Fitness is the same per-game score as the networks (±1 win/loss + gem margin / 500).
+- The search stays within `--cma-cap` (0.25 of each range) of the starting values, so the networks never get
+  extreme strategies to train under.
+- The frozen and prior opponents keep the compiled starting params as a fixed yardstick.
+
+**Outputs.**
+- `params_mean.json` and `snapshots/params_gen####.json` every generation, next to the network snapshots.
+  Revert either layer independently.
+- To ship a mean: `team_bot.py --set NAME=V ...` with the values in `params_mean.json`.
+
 ## What gets learned
 
 | Piece | How |

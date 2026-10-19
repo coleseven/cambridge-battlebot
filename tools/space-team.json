@@ -1,0 +1,15 @@
+{
+  "FIGHTER_ENGAGE_RANGE": [1, 6, "int"],
+  "RECALL_HP_FRAC": [0.2, 0.7],
+  "BANK_MIN_GEMS": [8, 72, "int"],
+  "BANK_NEAR_DIST": [2, 10, "int"],
+  "SHOP_RECALL_GOLD": [60, 400, "int"],
+  "FIGHT_MIN_HP": [0.2, 0.8],
+  "FIGHT_SLACK": [0, 3, "int"],
+  "SAFE_DAMAGE_FRAC": [0.5, 2.0],
+  "CLAIM_PENALTY": [0.0, 15.0],
+  "ENEMY_SIDE_WEIGHT": [0.0, 1.0],
+  "SQUAD_DPS_SHARE": [0.3, 0.9],
+  "SWITCH_MARGIN": [1.0, 4.0],
+  "FLEE_GEMS": [24, 200, "int"]
+}

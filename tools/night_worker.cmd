@@ -23,7 +23,7 @@ set /a tries=0
 rem Mode switch: with .arena\night_real.flag present, the night runs real-map fighter training on this PC
 rem (tools/real_train.py, run real1) instead of being a worker for the training PC.
 if exist .arena\night_real.flag (
-  .venv\Scripts\python -u tools\real_train.py run real1 --warm-run n3v3 --pop 16 --games 6 --jobs 12 --until 11:50 >> .arena\real-night.log 2>&1
+  .venv\Scripts\python -u tools\real_train.py run real1 --warm-run n3v3 --pop 16 --games 6 --jobs 12 --until 11:50 --dist .arena/dist >> .arena\real-night.log 2>&1
 ) else (
   .venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
 )

@@ -465,7 +465,10 @@ int choose_target(vec2 pos, int round, float hp, const Comms& cm) {
         if (i == W.target) cur_s = s;
         if (s > best_s) { best_s = s; best = i; }
     }
-    if (best < 0) return best_any;
+    // Nothing is safe to clear: take nothing (the none order heals / recalls), never the best-value group anyway.
+    // 19 Oct ladder: the forager's fallback (best_any) sent hurt bodies one by one at contest's monoliths
+    // (the map's only gem camps): 40-64 camp deaths and 0-400 gems a game. NO_SAFE_FALLBACK = 0 restores it.
+    if (best < 0) return NO_SAFE_FALLBACK ? -1 : best_any;
     const bool cur_respawning = W.target >= 0 && W.groups[W.target].ready_round > round + 3;
     if (W.target >= 0 && !cur_respawning && cur_s > 0 && best_s < cur_s * SWITCH_MARGIN) return W.target;
     return best;

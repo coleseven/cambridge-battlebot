@@ -47,8 +47,11 @@ constexpr int FLEE_GEMS = 150;
 constexpr int SQUADS = 2;
 // Each extra squad member adds this fraction of my dps to the kill-time estimate.
 constexpr float SQUAD_DPS_SHARE = 0.64195f;
-// Value of one gold relative to one gem when scoring camp groups.
-constexpr float GOLD_WEIGHT = 0.0f;
+// Value of one gold relative to one gem when scoring camp groups. Small but nonzero: on maps whose only gem
+// camps are monoliths (contest) the harmless gold clusters are then worth farming; elsewhere gems dominate.
+constexpr float GOLD_WEIGHT = 0.05f;
+// 1 = when no group is safe to clear, take no target (heal / recall); 0 = the forager's best-value fallback.
+constexpr int NO_SAFE_FALLBACK = 1;
 // Rounds added to a group's cost when an ally has claimed it (discourages doubling up).
 constexpr float CLAIM_PENALTY = 7.44221f;
 // Expected damage taken must stay below this fraction of current health to farm a group.

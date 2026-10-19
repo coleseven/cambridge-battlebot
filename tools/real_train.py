@@ -8,6 +8,7 @@ All candidates of a hero play the same games (common random numbers).
 
   .venv/Scripts/python tools/real_train.py run r1 --warm-run n3v3 [--pop 16] [--games 6] [--jobs 12]
         [--opps sparring-tarot v1 forager frozen] [--until 11:50] [--gens 0 (= until the deadline)]
+  .venv/Scripts/python tools/real_train.py run r2 --warm-run real1 --team team-director   (inside the director)
   .venv/Scripts/python tools/real_train.py status r1
 
 First run: copies the warm run's populations (read-only), freezes its elites as frozen_start.json (an opponent
@@ -111,7 +112,7 @@ def run(a):
                                              encoding="utf-8")
         if (d / "team_src").exists():
             shutil.rmtree(d / "team_src")
-        shutil.copytree(arena.ROOT / "bots" / "team" / "src", d / "team_src")
+        shutil.copytree(arena.ROOT / "bots" / a.team / "src", d / "team_src")
         nt.save_state(ck, st)
         print(f"real-map run {a.name}: warm-started {len(st['pops'])} populations from {st['warm']}; "
               f"frozen start + team source saved", flush=True)
@@ -191,6 +192,8 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("name")
     r.add_argument("--warm-run", default="n3v3")
+    r.add_argument("--team", default="team", help="generated combined bot (bots/<team>) whose source the run "
+                   "freezes as team_src on its first generation, e.g. team-director (tools/team_bot.py)")
     r.add_argument("--warm-arena", default="")
     r.add_argument("--pop", type=int, default=16)
     r.add_argument("--games", type=int, default=6, help="real games per candidate per generation")

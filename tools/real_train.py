@@ -55,17 +55,22 @@ def build_slots(d: Path, n: int):
 
 
 def opponent_bots(names, frozen_progs, ref_slot):
+    """Opponents. Our own team-bot variants are BlobBots, so distributed workers can play them:
+      frozen  our full bot with the networks this run started from
+      prior   our full bot with the hand-prior fighter (no networks; plays about like the forager alone)
+    Anything else (sparring-tarot, v1, forager) is a fixed copy under .arena/realopp/: those compile to different
+    wasm on each machine (and the training PC lacks some sources), so they stay on this machine (not shippable)."""
     out = {}
     for name in names:
-        if name == "frozen":                     # our full bot with the networks this run started from
+        if name == "frozen":
             out[name] = dist.virtual_bot(ref_slot, nvn.team_blob(nt, frozen_progs, 0), "frozen")
-        elif name == "forager":                  # strategy layer alone, as of the run's start (fixed copy)
-            src = arena.ARENA / "realopp" / "forager"
-            if not (src / "src").exists():
-                shutil.copytree(arena.ROOT / "bots" / "forager" / "src", src / "src")
-            out[name] = arena.build(src, "forager")
+        elif name == "prior":
+            out[name] = dist.virtual_bot(ref_slot, nvn.team_blob(nt, {}, 0), "prior")
         else:
-            out[name] = arena.build(arena.ROOT / "bots" / name, name)
+            src = arena.ARENA / "realopp" / name
+            if not (src / "src").exists():
+                shutil.copytree(arena.ROOT / "bots" / name / "src", src / "src")
+            out[name] = arena.build(src, name)
     return out
 
 
@@ -189,7 +194,7 @@ def main():
     r.add_argument("--warm-arena", default="")
     r.add_argument("--pop", type=int, default=16)
     r.add_argument("--games", type=int, default=6, help="real games per candidate per generation")
-    r.add_argument("--opps", nargs="+", default=["sparring-tarot", "v1", "forager", "frozen"])
+    r.add_argument("--opps", nargs="+", default=["sparring-tarot", "v1", "forager", "frozen", "prior"])
     r.add_argument("--jobs", type=int, default=12)
     r.add_argument("--gens", type=int, default=0, help="0 = run until --until")
     r.add_argument("--until", default="", help="HH:MM local: don't start a generation that would end after it")

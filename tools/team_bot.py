@@ -91,6 +91,35 @@ bool take_turn(int engage_range) {
 '''
 
 
+DRAFT_BLOCK = 16000          # word offset of the optional draft override inside the genome blob
+DRAFT_MAGIC = 0x54465244     # 'DRFT'
+
+
+def draft_override(src: str) -> str:
+    """forager draft.cpp -> same, but a genome blob that carries a draft block (training: one composition per
+    game, no rebuild) picks that composition instead of COMPS[DRAFT_COMP]. Without the block it is unchanged."""
+    old = "    const auto& comp = COMPS[static_cast<std::size_t>(DRAFT_COMP) % COMPS.size()];"
+    if src.count(old) != 1 or src.count('#include "params.h"\n') != 1:
+        sys.exit("forager draft.cpp layout changed; update tools/team_bot.py")
+    src = src.replace('#include "params.h"\n', '#include "params.h"\n#include "genome.h"\n')
+    return src.replace(old, f"""    // Training override (tools/team_bot.py): picks written into the genome blob at word {DRAFT_BLOCK}.
+    std::array<champion_draft, 5> override_comp{{}};
+    const bool use_override = GENOME_BLOB[{DRAFT_BLOCK}] == 0x{DRAFT_MAGIC:08X}u;
+    if (use_override)
+        for (int i = 0; i < 5; ++i) override_comp[i] = static_cast<champion_draft>(GENOME_BLOB[{DRAFT_BLOCK} + 1 + i]);
+    const auto& comp = use_override ? override_comp : COMPS[static_cast<std::size_t>(DRAFT_COMP) % COMPS.size()];""")
+
+
+def blob_with_draft(blob: bytes, picks) -> bytes:
+    """A genome blob (neat_train.blob) plus a draft block: picks = 5 champion_draft ids (0..10) in pick order."""
+    import struct
+    words = list(struct.unpack(f"<{len(blob) // 4}I", blob))
+    if len(words) > DRAFT_BLOCK:
+        raise ValueError("genome programs reach the draft block")
+    words += [0] * (DRAFT_BLOCK - len(words)) + [DRAFT_MAGIC] + [int(p) for p in picks]
+    return struct.pack(f"<{len(words)}I", *words)
+
+
 def wrap_fighter(src: str) -> str:
     """bots/neat bot.cpp -> fighter_bot.cpp: everything after the includes inside namespace fighter."""
     src = src.replace('#include "bot.h"\n', '#include "fighter.h"\n')
@@ -124,6 +153,8 @@ def main():
         shutil.rmtree(out / "src")
     shutil.copytree(macro, out / "src")
     (out / "src" / "main.cpp").write_text(MAIN_CPP, encoding="utf-8")
+    dc = out / "src" / "draft.cpp"
+    dc.write_text(draft_override(dc.read_text(encoding="utf-8")), encoding="utf-8")
     pp = out / "src" / "params.h"
     pp.write_text(pp.read_text(encoding="utf-8") + "\n// ---- fighter integration (tools/team_bot.py) ----\n"
                   f"constexpr int FIGHTER_ENGAGE_RANGE = {a.engage_range};   // fighter takes the turn when an enemy is this close\n"

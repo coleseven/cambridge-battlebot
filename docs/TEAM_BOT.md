@@ -61,3 +61,24 @@ The first version gave the fighter every turn with any enemy in view: 14/34 vs T
   the strategy numbers and NN training stay separate stages until we decide how to interleave them.
 - Then: CMA-ES the strategy layer around the adapted fighters; then comms and items (Astra's work, within the
   fuel budget).
+
+## Real-map fighter training (`tools/real_train.py`, first run night of 18-19 Oct)
+
+- NEAT on the per-hero networks inside the combined bot, on the 17-map pool, scored by real 5v5 games:
+  +1 win / -1 loss + gem margin / 500.
+- Each candidate for hero p plays `--games` games in a team drafted around p. The composition travels in the
+  genome blob's draft block (word 16000, magic `DRFT`), which the generated `draft.cpp` reads, so every hero
+  trains, including ones the forager never drafts (Vesper, Marcella, Willow). Verified: a blob drafted
+  Marcella / Willow / Vesper / Prism / Tavi and won 1044-720 vs starter.
+- Opponents: sparring-tarot, v1, a fixed copy of the forager alone, and `frozen` (our full bot with the
+  networks the run started from).
+- **Revert point:** `frozen_start.json` holds the warm run's elites, untouched by training. Every
+  generation is also exported to `snapshots/`.
+- The run snapshots `bots/team/src` as its fixed base (`team_src/`).
+- Smoke test: 88 games per generation in ~33 s at 12 jobs, 0 errors, clean resume. Full settings (pop 16,
+  6 games per candidate, ~1,056 games per generation) take ~6-7 min per generation on the main PC.
+- **Night mode switch:** with `.arena/night_real.flag` present, `tools/night_worker.cmd` runs
+  `real_train.py run real1 --warm-run n3v3 --pop 16 --games 6 --until 11:50` instead of the distributed
+  worker. Delete the flag to go back to helping the training PC. Crashes restart and resume.
+- It runs on the main PC only: the combined bot is generated from Astra's uncommitted forager, so the
+  training PC can't build it. Meanwhile the training PC continues 3v3 alone.

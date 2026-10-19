@@ -20,7 +20,13 @@ rem Progress curve first (~minutes; snapshots already scored are cached): new NE
 .venv\Scripts\python -u tools\progress.py n3v3 --team-size 3 --warm n2v2 --cgp c2v2 --jobs 12 >> .arena\progress-night.log 2>&1
 set /a tries=0
 :run
-.venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
+rem Mode switch: with .arena\night_real.flag present, the night runs real-map fighter training on this PC
+rem (tools/real_train.py, run real1) instead of being a worker for the training PC.
+if exist .arena\night_real.flag (
+  .venv\Scripts\python -u tools\real_train.py run real1 --warm-run n3v3 --pop 16 --games 6 --jobs 12 --until 11:50 >> .arena\real-night.log 2>&1
+) else (
+  .venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
+)
 set code=%errorlevel%
 echo === %date% %time% night worker exit %code% >> .arena\dist-night.log
 if "%code%"=="0" goto done

@@ -15,10 +15,20 @@ First run: copies the warm run's populations (read-only), freezes its elites as 
 and the revert point), and snapshots bots/team/src as the run's fixed base (team_src/), so regenerating bots/team
 later doesn't change a running experiment. Checkpoints and exports elites (+ snapshots/) every generation.
 Score per game (our side): +1 win / -1 loss, plus gem margin / 500; errored games -3.
+
+--cma tools/space-director.json: shared CMA-ES of the director's params on the SAME games (docs/DIRECTOR.md).
+Needs a team built with tools/team_bot.py --runtime-params <space> (the params travel in the genome blob). Each
+generation asks --cma-pop candidates; every (hero, schedule slot) cell is given one candidate (balanced: the
+cells are shuffled and dealt round-robin), and all network candidates of that hero play that cell with it, so
+the network ranking within a hero keeps its common random numbers. A candidate's fitness is the mean score of
+its ~games/pop share; the search stays within --cma-cap (normalised units) of the starting values. The frozen
+and prior opponents keep the compiled (starting) params as a fixed yardstick.
 """
 import argparse
 import json
+import pickle
 import random
+import re
 import shutil
 import sys
 import time
@@ -31,6 +41,7 @@ import dist  # noqa: E402
 import neat_train as nt  # noqa: E402
 import nvn  # noqa: E402
 import team_bot as tb  # noqa: E402
+import tune  # noqa: E402
 
 PICKS = nt.PICKS
 
@@ -93,6 +104,54 @@ def schedule(gen, hero, k, opps, maps):
     return out
 
 
+class SharedCMA:
+    """CMA-ES over the director params, told once per generation from the real-map games."""
+
+    def __init__(self, d: Path, space_path: str, popsize: int, sigma: float, cap: float):
+        import cma
+        self.d, self.space = d, json.loads(Path(space_path).read_text(encoding="utf-8"))
+        self.path = d / "cma.pkl"
+        lp = d / "team_src" / "params_runtime.h"
+        loader = lp.read_text(encoding="utf-8") if lp.exists() else ""
+        if "PRMS" not in loader:
+            sys.exit("--cma needs a team built with tools/team_bot.py --runtime-params (team_src has no loader)")
+        order = re.search(r"in this order: ([^)]*)\)", loader).group(1).split(", ")
+        if order != list(self.space):
+            sys.exit(f"--cma space order {list(self.space)} != the team's runtime params {order}")
+        if self.path.exists():
+            self.es, self.start = pickle.loads(self.path.read_bytes())
+        else:
+            text = (d / "team_src" / "params.h").read_text(encoding="utf-8")
+            self.start = {}
+            for k in self.space:
+                v = re.search(rf"^(?:constexpr|inline) \w+ {k} = ([^;]+);", text, re.M).group(1).rstrip("f")
+                self.start[k] = float(v)
+            x0 = tune.encode(self.start, self.space)
+            lo = [max(0.0, x - cap) for x in x0]
+            hi = [min(1.0, x + cap) for x in x0]
+            self.es = cma.CMAEvolutionStrategy(x0, sigma, {"bounds": [lo, hi], "popsize": popsize,
+                                                           "verbose": -9, "seed": 1})
+        self.xs, self.vals = [], []
+
+    def ask(self):
+        self.xs = self.es.ask()
+        self.vals = [tune.decode(x, self.space) for x in self.xs]
+        return self.vals
+
+    def tell(self, fits, gen):
+        self.es.tell(self.xs, [-f for f in fits])           # cma minimises
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_bytes(pickle.dumps((self.es, self.start)))
+        tmp.replace(self.path)
+        mean = tune.decode(self.es.mean, self.space)
+        out = {"gen": gen, "mean": mean, "sigma": round(self.es.sigma, 4), "start": self.start,
+               "best": self.vals[max(range(len(fits)), key=lambda i: fits[i])]}
+        (self.d / "params_mean.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
+        (self.d / "snapshots").mkdir(exist_ok=True)
+        (self.d / "snapshots" / f"params_gen{gen:04d}.json").write_text(json.dumps(out), encoding="utf-8")
+        return mean
+
+
 def run(a):
     d = nt.OUT / a.name
     d.mkdir(parents=True, exist_ok=True)
@@ -116,6 +175,7 @@ def run(a):
         nt.save_state(ck, st)
         print(f"real-map run {a.name}: warm-started {len(st['pops'])} populations from {st['warm']}; "
               f"frozen start + team source saved", flush=True)
+    shared = SharedCMA(d, a.cma, a.cma_pop, a.cma_sigma, a.cma_cap) if a.cma else None
     frozen_progs = nvn.load_programs(d / "frozen_start.json")
     slots = build_slots(d, max(2, 2 * a.jobs))
     opps = opponent_bots(a.opps, frozen_progs, slots[0])
@@ -132,24 +192,40 @@ def run(a):
         gen = st["gen"] + 1
         team = {q: nt.program(st["elites"][q], st["pops"][q].config) for q in st["pops"]}
         games, meta, items_of = [], [], {}
+        cell_of = {}                      # (hero, slot) -> director-params candidate (shared CMA-ES)
+        if shared:
+            vals = shared.ask()
+            cells = [(p, j) for p in st["pops"] for j in range(a.games)]
+            random.Random(f"cma:{gen}").shuffle(cells)
+            cell_of = {c: k % len(vals) for k, c in enumerate(cells)}
         for p, pop in st["pops"].items():
             items_of[p] = list(pop.population.items())
             sched = schedule(gen, p, a.games, list(opps), maps)
             for gi, (gid, g) in enumerate(items_of[p]):
                 prog = nt.program(g, pop.config)
                 blob = nvn.team_blob(nt, team, 0, p, prog)
-                for m, oname, seat, comp in sched:
-                    cand = dist.virtual_bot(slots[0], tb.blob_with_draft(blob, comp), f"{PICKS[p]}{gi}")
+                for j, (m, oname, seat, comp) in enumerate(sched):
+                    b = tb.blob_with_draft(blob, comp)
+                    if shared:
+                        b = tb.blob_with_params(b, list(vals[cell_of[(p, j)]].values()))
+                    cand = dist.virtual_bot(slots[0], b, f"{PICKS[p]}{gi}")
                     ob = opps[oname]
                     games.append((cand, ob, m) if seat == 0 else (ob, cand, m))
-                    meta.append((p, gid, oname, seat))
+                    meta.append((p, gid, oname, seat, cell_of.get((p, j), -1)))
         res = dist.play_slots(games, a.jobs, slots, root=a.dist or None)
-        fit, by_opp, errs = {}, {}, 0
-        for (p, gid, oname, seat), r in zip(meta, res):
+        fit, by_opp, errs, by_param = {}, {}, 0, {}
+        for (p, gid, oname, seat, c), r in zip(meta, res):
             s = score(r, seat)
             errs += "error" in r
             fit.setdefault((p, gid), []).append(s)
             by_opp.setdefault(oname, []).append(s)
+            by_param.setdefault(c, []).append(s)
+        cma_info = {}
+        if shared:
+            pfits = [sum(by_param[c]) / len(by_param[c]) if by_param.get(c) else -3.0 for c in range(len(vals))]
+            mean = shared.tell(pfits, gen)
+            cma_info = {"cma": {"fits": [round(f, 3) for f in pfits], "sigma": round(shared.es.sigma, 4),
+                                "games": [len(by_param.get(c, [])) for c in range(len(vals))], "mean": mean}}
         summary = {}
         for p, pop in st["pops"].items():
             pre = {gid: sum(v) / len(v) for (q, gid), v in fit.items() if q == p}
@@ -173,10 +249,14 @@ def run(a):
         vs = {o: round(sum(v) / len(v), 3) for o, v in by_opp.items()}
         with log.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"gen": gen, "secs": round(secs), "games": len(games), "errors": errs, "vs": vs,
-                                 "best": summary, **({"dist": dist.take_stats(a.dist)} if a.dist else {})}) + "\n")
+                                 "best": summary, **cma_info,
+                                 **({"dist": dist.take_stats(a.dist)} if a.dist else {})}) + "\n")
         print(f"gen {gen:4} real  {secs:6.0f}s  {len(games)} games  errors {errs}  mean score vs " +
               " ".join(f"{o}:{v:+.2f}" for o, v in vs.items()) + "  best " +
-              " ".join(f"{k}:{v[0]:+.2f}" for k, v in summary.items()), flush=True)
+              " ".join(f"{k}:{v[0]:+.2f}" for k, v in summary.items()) +
+              (f"  cma best {max(cma_info['cma']['fits']):+.2f} median "
+               f"{sorted(cma_info['cma']['fits'])[len(vals) // 2]:+.2f} sigma {shared.es.sigma:.3f}" if shared else ""),
+              flush=True)
 
 
 def status(a):
@@ -201,6 +281,11 @@ def main():
     r.add_argument("--jobs", type=int, default=12)
     r.add_argument("--gens", type=int, default=0, help="0 = run until --until")
     r.add_argument("--until", default="", help="HH:MM local: don't start a generation that would end after it")
+    r.add_argument("--cma", default="", metavar="SPACE.json",
+                   help="also CMA-ES the director params on the same games (needs a --runtime-params team)")
+    r.add_argument("--cma-pop", type=int, default=8)
+    r.add_argument("--cma-sigma", type=float, default=0.08, help="initial step (normalised units)")
+    r.add_argument("--cma-cap", type=float, default=0.25, help="max distance from the start (normalised units)")
     dist.add_arg(r)
     s = sub.add_parser("status")
     s.add_argument("name")

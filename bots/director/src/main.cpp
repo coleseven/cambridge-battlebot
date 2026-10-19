@@ -4,8 +4,10 @@
 #include "bot.h"
 #include "draft.h"
 #include "fighter.h"
+#include "params_runtime.h"
 
 int main() {
+    params_runtime_load();   // training: CMA-ES candidate values from the genome blob (no-op otherwise)
     Bot bot;
     bool prepared = false;
     while (true) {

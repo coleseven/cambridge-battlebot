@@ -5,6 +5,7 @@
 #include "weights.h"
 #include "genome.h"
 #include "budget.h"
+#include "order.h"
 #include <cstring>
 #include <algorithm>
 #include <array>
@@ -46,6 +47,8 @@ struct State {
     int last_seen_round = -1000;
 };
 State S;
+// The strategy layer's order for this turn (order.h); default = none, i.e. the training behaviour.
+FighterOrder ORDER;
 
 int cheb(vec2 a, vec2 b) { return static_cast<int>(a.chebyshev_distance(b)); }
 bool inb(vec2 p) { return p.x >= 0 && p.y >= 0 && p.x < S.w && p.y < S.h; }
@@ -228,6 +231,30 @@ bool step_along(const c::distance_field& f, const c::bitboard& blocked) {
 std::uint64_t FUEL_MAX = 0;
 #endif
 
+// Objective = tiles of groups that are alive or waiting to be captured; groups seen respawning are dropped.
+// Rebuilt only when the set of live groups changes (a full field is ~6k fuel, far more on big maps); the
+// cached field is identical, so games are unchanged. A strategy layer may also call this in quiet turns
+// (fighter::warm), so the rebuild seldom lands on a fight turn.
+void refresh_objective() {
+    if (S.camp_tiles.is_empty()) return;
+    const auto visible = c::vision::visible_tiles();
+    c::bitboard live;
+    live.clear();
+    for (std::size_t i = 0; i < S.groups.size(); ++i) {
+        bool keep = true;
+        if (!(S.group_tiles[i] & visible).is_empty()) {
+            try { keep = !std::holds_alternative<c::map::camp_group_respawning>(S.groups[i].state()); }
+            catch (const std::exception&) {}
+        }
+        if (keep) live = live | S.group_tiles[i];
+    }
+    if (!S.objective_ok || !(live == S.objective_live)) {
+        S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
+        S.objective_live = live;
+        S.objective_ok = true;
+    }
+}
+
 // Allies seen this turn (team path only).
 struct Ally { vec2 pos; float frac; int range; };
 std::vector<Ally> ALLIES;
@@ -300,38 +327,44 @@ void play() {
 
     // Harmless clusters in view (the contested objective).
     std::vector<c::camp> camps;
-    for (const auto& m : c::vision::camps()) {
-        try { if (m.strength() <= 0 && m.health() > 0) camps.push_back(m); } catch (const std::exception&) {}
+    bool skip_camps = false;
+    if (ORDER.near_camps_only) {
+        c::bitboard reach;
+        reach.clear();
+        reach.draw_chebyshev(pos, my_range + 1);
+        skip_camps = (c::vision::camp_tiles() & reach).is_empty();
+    }
+    if (!skip_camps) for (const auto& m : c::vision::camps()) {
+        try {
+            if (ORDER.near_camps_only && cheb(pos, m.spawn_position()) > my_range + 1) continue;
+            if (m.strength() <= 0 && m.health() > 0) camps.push_back(m);
+            else if (ORDER.has_camps && ORDER.camps.is_set(m.spawn_position()) && m.is_awake() && m.health() > 0)
+                camps.push_back(m);   // the ordered group, already fighting us
+        } catch (const std::exception&) {}
     }
     const int gems = static_cast<int>(me.gem_count());
     // Objective = tiles of groups that are alive or waiting to be captured; drop groups seen respawning.
-    if (!S.camp_tiles.is_empty()) {
-        const auto visible = c::vision::visible_tiles();
-        c::bitboard live;
-        live.clear();
-        for (std::size_t i = 0; i < S.groups.size(); ++i) {
-            bool keep = true;
-            if (!(S.group_tiles[i] & visible).is_empty()) {
-                try { keep = !std::holds_alternative<c::map::camp_group_respawning>(S.groups[i].state()); }
-                catch (const std::exception&) {}
-            }
-            if (keep) live = live | S.group_tiles[i];
-        }
-        // Rebuild the objective field only when the set of live groups changes (a full field is ~6k fuel,
-        // far more on big maps); the cached field is identical, so games are unchanged.
-        if (!S.objective_ok || !(live == S.objective_live)) {
-            S.objective = field_to(live.is_empty() ? S.camp_tiles : live);
-            S.objective_live = live;
+    // An ordered goal replaces it (and skips this work).
+    if (!ORDER.goal && ORDER.live && !S.camp_tiles.is_empty()) {
+        if (!S.objective_ok || !(*ORDER.live == S.objective_live)) {
+            S.objective = field_to(ORDER.live->is_empty() ? S.camp_tiles : *ORDER.live);
+            S.objective_live = *ORDER.live;
             S.objective_ok = true;
         }
+    } else if (!ORDER.goal) {
+        refresh_objective();
     }
+    const c::distance_field& OBJ = ORDER.goal ? *ORDER.goal : *S.objective;
+    // Leash (order.h): a move may not end farther than max(leash, here) on the leash field.
+    const int leash_cap = ORDER.leash_field ? std::max(ORDER.leash, fv(*ORDER.leash_field, pos)) : 0;
+    auto leashed = [&](vec2 q) { return ORDER.leash_field && fv(*ORDER.leash_field, q) > leash_cap; };
     vec2 bank_altar{-1, -1};
     for (auto a : S.altars) if (cheb(pos, a) <= 1) bank_altar = a;
 
     if (foes.empty() && camps.empty() && !(gems > 0 && bank_altar.x >= 0)) {
         // Fixed rule only when nothing is in view: heal at spawn if hurt, else head for the objective.
         if (my_frac < 0.9f) { if (!S.own_spawn.is_set(pos)) step_along(*S.home, blocked); return; }
-        step_along(*S.objective, blocked);
+        step_along(OBJ, blocked);
         return;
     }
     if (!foes.empty()) { S.last_seen = foes[0].pos; S.last_seen_round = round; }
@@ -369,7 +402,7 @@ void play() {
     for (std::size_t mi = 0; mi < MOVES.size(); ++mi) {
         const vec2 q{pos.x + MOVES[mi].x, pos.y + MOVES[mi].y};
         const bool stay = mi == 0;
-        if (!stay && (!can_move || !inb(q) || blocked.is_set(q))) continue;
+        if (!stay && (!can_move || !inb(q) || blocked.is_set(q) || leashed(q))) continue;
         // Best attackable foe from q (lowest health).
         int atk_t = -1;
         if (can_attack && (stay || !S.ranged))
@@ -404,7 +437,7 @@ void play() {
                 for (int sign : {1, -1}) {
                     const int dx = (f.x > pos.x) - (f.x < pos.x), dy = (f.y > pos.y) - (f.y < pos.y);
                     vec2 d{pos.x + sign * 2 * dx, pos.y + sign * 2 * dy};
-                    if (inb(d) && !blocked.is_set(d)) add(d, si, -1, false);
+                    if (inb(d) && !blocked.is_set(d) && !leashed(d)) add(d, si, -1, false);
                 }
             }
         }
@@ -414,12 +447,12 @@ void play() {
     // Values that depend only on the destination tile or only on the target are computed once per turn
     // (several options share a destination: attack / hold / spells). Same numbers in the same order as
     // computing them per option, so the scores and games are unchanged; it only saves fuel (budget.h).
-    const int obj_now = fv(*S.objective, pos), alt_now = fv(*S.altar, pos);
+    const int obj_now = fv(OBJ, pos), alt_now = fv(*S.altar, pos);
     struct DestInfo { vec2 q; float threat; int home_q, obj_q, alt_q; float ally_d, ally_frac; };
     std::vector<DestInfo> dcache;
     auto dest_info = [&](vec2 q) -> const DestInfo& {
         for (const auto& d : dcache) if (d.q == q) return d;
-        DestInfo d{q, 0.0f, fv(*S.home, q), fv(*S.objective, q), fv(*S.altar, q), 0.0f, 0.0f};
+        DestInfo d{q, 0.0f, fv(*S.home, q), fv(OBJ, q), fv(*S.altar, q), 0.0f, 0.0f};
         for (const auto& e : foes) if (cheb(q, e.pos) <= e.reach) d.threat += e.dps;
         d.threat /= my_max;
         if constexpr (TEAM) {

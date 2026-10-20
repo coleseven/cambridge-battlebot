@@ -117,6 +117,57 @@ variables. A generated `params_runtime.h` loads them at start-up from a `'PRMS'`
   Revert either layer independently.
 - To ship a mean: `team_bot.py --set NAME=V ...` with the values in `params_mean.json`.
 
+## 20 Oct: the Week 2 patch (engine 1.0.0)
+
+Patch notes: https://2026a.battlecode.co.uk/game/patch-notes. Memory note: `week2-patch`.
+
+**What changed in the game**
+- Our meta comp was nerfed: all five of Varg, C&I, Stellar, Ren and Tavi.
+- Camp rewards were cut 3–6×; elk range is now 4 and monolith range 5.
+- New Golem camp (5,000 HP, 120 str, range 4, 36 gems); new champion Heart of Ruin (champion_type 12, draft 11).
+- Kill reward 100 gold; ward cooldown 10; altar lock 5 HP.
+- Many games now reach round 2,000, where lifetime gold, then kills, decide.
+
+**What we changed**
+- CLI 3.0.1, SDK refreshed (`cambc init` on the main PC), and the new 21-map pool (`00*` the old maps, `01*` new).
+- Director:
+  - Golem stats and cluster HP;
+  - recall "camp nearby" radius 5;
+  - Heart of Ruin in the draft table;
+  - field building fixed at `FIELDS_PER_TURN` per quiet turn, not "while fuel lasts", so play doesn't depend on fuel used elsewhere.
+- Fighter: Heart of Ruin uses the hand prior (no trained row).
+
+**Draft sweep** (21 maps vs Tarot / v1 / starter):
+- Pre-patch draft 1 (C&I, Varg, Stellar, Ren, Ryth) scored best vs the pool, +0.492 against the current draft's +0.415. But it lost the head-to-head with the current draft 17/42, so the current draft stays.
+- The new gold-focused drafts (Marcella, Vesper, Willow, Heart of Ruin) scored +0.165 to +0.248, all worse.
+
+## Learned director
+
+A NEAT network re-ranks the candidate orders each turn (`LEARNED_DIRECTOR`, the `'DIRN'` genome-blob block at
+word 15000). It is trained by `tools/director_train.py` and baked by `team_bot.py --director-net best.json`.
+
+**Candidates**
+- farm one of the top 5 groups by the rule scorer, plus the current target and the rule's group;
+- bank, heal, shop, join, intercept, none.
+
+**Features (25)**
+- 0: "the rule cascade chose this";
+- 1–7: the order type;
+- 8–16: farm terms (score relative to the best, distance, value, wait, damage vs health, ally claims, current target, enemy-side risk, recent fight nearby);
+- 17–24: context (health, bag, gold, altar and home distance, round, score difference, nearest enemy).
+
+**Warm start.** Every generation-0 network weights feature 0 at 3 and the rest about 0, so it plays like the
+rule director. The candidates and features are computed with or without a network, so the rule-only build
+spends the same fuel. Exact game equality still fails on a few big maps, where the network's extra fuel tips
+heavy turns. Training and shipping use the same code, so that only affects comparisons with the rules opponent.
+`tools/check_director_net.py` checks the plumbing.
+
+**Training**
+- Population 20; 6 (map, opponent) schedule entries per generation, each played from both seats, the same for every network.
+- Opponents: the rule director (the same build, no block), Tarot, v1, the forager and the starter.
+- Fighters (real1) and params stay fixed. That's the alternating-stage plan: the shared run of 19 Oct improved neither layer.
+- Distributed over both PCs (`--dist`).
+
 ## What gets learned
 
 | Piece | How |

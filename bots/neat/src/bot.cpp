@@ -389,7 +389,8 @@ void play() {
     }
 
     // ---- enumerate and score options ----
-    const auto& W = WEIGHTS[std::clamp(S.type, 0, 11)];
+    // champion_type 12 (Heart of Ruin, 20 Oct patch) has no trained row yet: the hand prior.
+    const auto& W = S.type >= 0 && S.type <= 11 ? WEIGHTS[S.type] : PRIOR;
     const int home_now = fv(*S.home, pos);
     std::vector<Opt> opts;
     opts.reserve(40);

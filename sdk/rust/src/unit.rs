@@ -295,12 +295,16 @@ impl Champion {
         let h = self.handle()?;
         query(|p| unsafe { sys::champion(h.0, p) })
     }
-    /// Return this champion's type; live champions require a host query.
+    fn identity(&self) -> Result<sys::ChampionIdentity> {
+        let h = self.handle()?;
+        query(|p| unsafe { sys::champion_identity(h.0, p) })
+    }
+    /// Return this champion's type; live champions read it without vision.
     pub fn champion_name(&self) -> Result<ChampionType> {
         if let UnitIdentity::Design(t) = self.unit.identity {
             Ok(t)
         } else {
-            ChampionType::try_from(self.info()?.kind)
+            ChampionType::try_from(self.identity()?.kind)
         }
     }
     /// Query the checked champion passive from its engine design.
@@ -309,9 +313,9 @@ impl Champion {
         let d = query(|p| unsafe { sys::champion_design(kind as i32, p) })?;
         PassiveType::try_from(d.definition.passive_type)
     }
-    /// Query the champion's team relative to the guest perspective.
+    /// Query the champion's team relative to the guest perspective; no vision required.
     pub fn team(&self) -> Result<Team> {
-        Team::from_absolute(self.info()?.team)
+        Team::from_absolute(self.identity()?.team)
     }
     /// Check whether this champion belongs to the observing team.
     pub fn is_ally(&self) -> Result<bool> {
@@ -630,9 +634,10 @@ impl Champion {
         self.own()?;
         query(|out| unsafe { sys::move_to(destination.x, destination.y, out) }).map(|successful| successful != 0)
     }
-    /// Move self to the reachable tile on a shortest path to `target`, avoiding walls, holes, altars,
-    /// the enemy spawn and visible units. Returns `Ok(false)` without moving when already there,
-    /// unable to move, or `target` is blocked or unreachable, and for a newly revealed obstruction.
+    /// Move self to the reachable tile on a shortest path to `target`. Always treat the target as free for pathfinding,
+    /// while avoiding other walls, holes, altars, enemy spawn tiles, visible units and teleport reservations.
+    /// Returns `Ok(false)` when already there, unable to move, no route exists, or a hidden obstruction is revealed.
+    /// The engine still validates the chosen landing tile: trying to enter a known blocked target returns `Err`.
     ///
     /// # Arguments
     /// * `target` - Map tile to approach.
@@ -650,9 +655,7 @@ impl Champion {
         blocked.union_assign(&crate::world::camp_tiles()?)?;
         blocked.union_assign(&crate::world::teleport_tiles()?)?;
         blocked.set(origin, false)?;
-        if blocked.is_set(target)? {
-            return Ok(false);
-        }
+        blocked.set(target, false)?;
         let mut roots = Bitboard::new()?;
         roots.set(target, true)?;
         let mut destinations = Bitboard::new()?;
@@ -811,6 +814,11 @@ impl Camp {
     #[must_use]
     pub fn is_monolith(&self) -> bool {
         self.kind() == CampType::Monolith
+    }
+    /// Return whether this camp is a golem.
+    #[must_use]
+    pub fn is_golem(&self) -> bool {
+        self.kind() == CampType::Golem
     }
     /// Return the immutable engine spawn position, not a current live position.
     #[must_use]

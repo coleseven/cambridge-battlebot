@@ -29,6 +29,8 @@ module Sys = struct
   external board_ally_occupancy : int -> int = "cambc_board_ally_occupancy"
   external board_enemy_occupancy : int -> int = "cambc_board_enemy_occupancy"
   external camp_occupancy : int -> int = "cambc_camp_occupancy"
+  external awake_camp_occupancy : int -> int = "cambc_awake_camp_occupancy"
+  external asleep_camp_occupancy : int -> int = "cambc_asleep_camp_occupancy"
   external board_ally_ward_occupancy : int -> int = "cambc_board_ally_ward_occupancy"
   external board_enemy_ward_occupancy : int -> int = "cambc_board_enemy_ward_occupancy"
   external ward_at : int -> int -> int -> int = "cambc_ward_at"
@@ -64,6 +66,7 @@ module Sys = struct
   external read_shared_memory : int -> int -> int -> int = "cambc_read_shared_memory"
   external write_shared_memory : int -> int -> int -> int = "cambc_write_shared_memory"
   external champion : int -> int -> int = "cambc_champion"
+  external champion_identity : int -> int -> int = "cambc_champion_identity"
   external champion_design : int -> int -> int = "cambc_champion_design"
   external champion_restrictions : int -> int -> int = "cambc_champion_restrictions"
   external champion_ability_props : int -> int -> int -> int = "cambc_champion_ability_props"
@@ -102,6 +105,7 @@ module Sys = struct
   external camp_design : int -> int -> int = "cambc_camp_design"
   external camp_at : int -> int -> int -> int = "cambc_camp_at"
   external champion_at : int -> int -> int -> int = "cambc_champion_at"
+  external is_visible : int -> int -> int -> int = "cambc_is_visible"
   external has_camp : int -> int -> int -> int = "cambc_has_camp"
   external has_champion : int -> int -> int -> int = "cambc_has_champion"
   external board_vision : int -> int = "cambc_board_vision"
@@ -249,20 +253,23 @@ module Camp_type = struct
     | Gem_cluster
     | Gold_cluster
     | Monolith
+    | Golem
 
-  let all = [ Wolf; Elk; Gem_cluster; Gold_cluster; Monolith ]
+  let all = [ Wolf; Elk; Gem_cluster; Gold_cluster; Monolith; Golem ]
   let to_int = function
     | Wolf -> 0
     | Elk -> 1
     | Gem_cluster -> 2
     | Gold_cluster -> 3
     | Monolith -> 4
+    | Golem -> 5
   let of_int = function
     | 0 -> Wolf
     | 1 -> Elk
     | 2 -> Gem_cluster
     | 3 -> Gold_cluster
     | 4 -> Monolith
+    | 5 -> Golem
     | n -> raise (Invalid_tag ("Camp_type", n))
   let to_string = function
     | Wolf -> "Wolf"
@@ -270,6 +277,7 @@ module Camp_type = struct
     | Gem_cluster -> "GemCluster"
     | Gold_cluster -> "GoldCluster"
     | Monolith -> "Monolith"
+    | Golem -> "Golem"
 end
 
 module Passive = struct
@@ -283,8 +291,9 @@ module Passive = struct
     | Reset_cooldowns_on_kill
     | Retaliation
     | Stun_immunity
+    | Missing_health_damage
 
-  let all = [ None; Bonus_gold; Remote_shop; Gem_focus; Splash_attack; Health_strength; Reset_cooldowns_on_kill; Retaliation; Stun_immunity ]
+  let all = [ None; Bonus_gold; Remote_shop; Gem_focus; Splash_attack; Health_strength; Reset_cooldowns_on_kill; Retaliation; Stun_immunity; Missing_health_damage ]
   let of_int = function
     | 0 -> None
     | 1 -> Bonus_gold
@@ -295,6 +304,7 @@ module Passive = struct
     | 6 -> Reset_cooldowns_on_kill
     | 7 -> Retaliation
     | 8 -> Stun_immunity
+    | 10 -> Missing_health_damage
     | n -> raise (Invalid_tag ("Passive", n))
   let to_string = function
     | None -> "None"
@@ -306,6 +316,7 @@ module Passive = struct
     | Reset_cooldowns_on_kill -> "Reset_cooldowns_on_kill"
     | Retaliation -> "Retaliation"
     | Stun_immunity -> "Stun_immunity"
+    | Missing_health_damage -> "Missing_health_damage"
 end
 
 module Champion_draft = struct
@@ -321,8 +332,9 @@ module Champion_draft = struct
     | Ren
     | Varg
     | Tavi
+    | Heart_of_ruin
 
-  let all = [ Ryth; Vesper_vale; Vendetta; Cassi_and_issac; Stellar; Prism; Marcella; Willow; Ren; Varg; Tavi ]
+  let all = [ Ryth; Vesper_vale; Vendetta; Cassi_and_issac; Stellar; Prism; Marcella; Willow; Ren; Varg; Tavi; Heart_of_ruin ]
   let to_int = function
     | Ryth -> 0
     | Vesper_vale -> 1
@@ -335,6 +347,7 @@ module Champion_draft = struct
     | Ren -> 8
     | Varg -> 9
     | Tavi -> 10
+    | Heart_of_ruin -> 11
   let of_int = function
     | 0 -> Ryth
     | 1 -> Vesper_vale
@@ -347,6 +360,7 @@ module Champion_draft = struct
     | 8 -> Ren
     | 9 -> Varg
     | 10 -> Tavi
+    | 11 -> Heart_of_ruin
     | n -> raise (Invalid_tag ("Champion_draft", n))
   let to_string = function
     | Ryth -> "Ryth"
@@ -360,6 +374,7 @@ module Champion_draft = struct
     | Ren -> "Ren"
     | Varg -> "Varg"
     | Tavi -> "Tavi"
+    | Heart_of_ruin -> "Heart_of_ruin"
 end
 
 module Champion_type = struct
@@ -376,8 +391,9 @@ module Champion_type = struct
     | Ren
     | Varg
     | Tavi
+    | Heart_of_ruin
 
-  let all = [ Ryth; Vesper_vale; Vendetta; Cassi; Issac; Stellar; Prism; Marcella; Willow; Ren; Varg; Tavi ]
+  let all = [ Ryth; Vesper_vale; Vendetta; Cassi; Issac; Stellar; Prism; Marcella; Willow; Ren; Varg; Tavi; Heart_of_ruin ]
   let to_int = function
     | Ryth -> 0
     | Vesper_vale -> 1
@@ -391,6 +407,7 @@ module Champion_type = struct
     | Ren -> 9
     | Varg -> 10
     | Tavi -> 11
+    | Heart_of_ruin -> 12
   let of_int = function
     | 0 -> Ryth
     | 1 -> Vesper_vale
@@ -404,6 +421,7 @@ module Champion_type = struct
     | 9 -> Ren
     | 10 -> Varg
     | 11 -> Tavi
+    | 12 -> Heart_of_ruin
     | n -> raise (Invalid_tag ("Champion_type", n))
   let to_string = function
     | Ryth -> "Ryth"
@@ -418,6 +436,7 @@ module Champion_type = struct
     | Ren -> "Ren"
     | Varg -> "Varg"
     | Tavi -> "Tavi"
+    | Heart_of_ruin -> "Heart_of_ruin"
 end
 
 module Ability_kind = struct
@@ -780,9 +799,11 @@ module Error_code = struct
     | Invalid_action_sell_already_sold
     | Invalid_action_sell_gold_overflow
     | Invalid_action_sell_not_on_spawn
+    | Draft_already_picked
+    | Draft_no_champion_selected
     | Unknown of int
 
-  let all = [ Success; Invalid_handle; Out_of_memory; File_not_found; Null_pointer; Invalid_argument; Map_parse_error; Invalid_map_file; Invalid_map_version; Replay_parse_error; Invalid_replay_file; Invalid_replay_version; Invalid_draft; Draft_not_drafting; Draft_duplicate_champion; Draft_invalid_round; Draft_unavailable; Already_initialized; Invalid_action; Invalid_action_memory_bad_range; Invalid_action_memory_draft_frozen; Invalid_action_move_cant_move; Invalid_action_move_bad_destination; Invalid_action_spell_cast_invalid_source; Invalid_action_spell_cast_invalid_slot; Invalid_action_spell_cast_no_ability; Invalid_action_spell_cast_cant_cast; Invalid_action_spell_cast_already_cast; Invalid_action_spell_cast_on_cooldown; Invalid_action_spell_cast_no_charges; Invalid_action_spell_cast_bad_target; Invalid_action_spell_cast_out_of_range; Invalid_action_spell_cast_bad_destination; Invalid_action_cant_act; Invalid_action_is_recalling; Invalid_action_is_submitting_gems; Invalid_action_move_already_moved; Invalid_action_move_out_of_range; Invalid_action_move_unreachable; Invalid_action_attack_invalid_source; Invalid_action_attack_cant_attack; Invalid_action_attack_already_attacked; Invalid_action_attack_bad_target; Invalid_action_attack_out_of_range; Invalid_action_recall_cant_channel; Invalid_action_submit_gems_cant_channel; Invalid_action_submit_gems_no_gems; Invalid_action_submit_gems_bad_altar; Invalid_action_submit_gems_out_of_range; Invalid_action_buy_item_not_on_spawn; Invalid_action_buy_item_invalid_item; Invalid_action_buy_item_invalid_count; Invalid_action_buy_item_not_enough_gold; Invalid_action_buy_item_inventory_full; Invalid_action_buy_item_stats_overflow; Invalid_action_buy_consumable_not_on_spawn; Invalid_action_buy_consumable_invalid_type; Invalid_action_buy_consumable_invalid_count; Invalid_action_buy_consumable_inventory_full; Invalid_action_buy_consumable_not_enough_gold; Invalid_action_use_consumable_invalid_type; Invalid_action_use_consumable_not_owned; Invalid_action_place_ward_no_charges; Invalid_action_place_ward_cant_place; Invalid_action_place_ward_bad_destination; Invalid_action_place_ward_out_of_range; Map_set_team_aspawn_area_bad_position; Map_add_bush_bad_position; Map_remove_bush_bad_position; Map_add_wall_bad_position; Map_remove_wall_bad_position; Map_add_hole_bad_position; Map_remove_hole_bad_position; Map_add_altar_bad_position; Map_remove_altar_bad_position; Map_get_bush_bad_position; Map_get_wall_bad_position; Map_get_hole_bad_position; Map_get_altar_bad_position; Map_get_camp_handle_at_bad_position; Map_add_camp_bad_position; Map_set_camp_bad_position; Invalid_action_champion_teleport_bad_destination; Invalid_action_respawn_group_blocked_spawn; Invalid_action_camp_teleport_bad_destination; Timeline_bad_seek_position; Timeline_bad_seek_substep; Api_no_map; Managed_resources_bad_position; Managed_resources_bad_radius; Managed_resources_aliasing; Managed_resources_metadata_mismatch; Managed_resources_opaque_origin; Api_invalid_team; Api_invalid_perspective; Api_not_initialized; Api_bad_position; Api_not_in_vision; Api_not_found; Api_invalid_camp_group; Api_invalid_camp_info; Api_invalid_camp; Api_invalid_champion; Api_invalid_ward; Api_invalid_ability; Api_not_teammate; Api_camp_group_not_waiting_to_respawn; Api_champion_alive; Api_invalid_champion_type; Api_invalid_camp_type; Api_value_out_of_range; Api_buffer_too_small; Api_not_owner; Invalid_action_recall_already_used; Invalid_action_submit_gems_already_used; Invalid_action_cancel_channel_not_channeling; Invalid_action_cancel_channel_already_used; Invalid_action_place_ward_ally_ward_present; Invalid_action_altar_lock_bad_altar; Invalid_action_altar_lock_out_of_range; Invalid_action_altar_lock_already_locked; Invalid_action_is_teleporting; Invalid_action_cancel_channel_not_cancellable; Invalid_action_submit_gems_altar_locked; Invalid_action_spell_cast_already_moved; Invalid_action_move_exclusive_spell_cast; Invalid_action_sell_not_tavi; Invalid_action_sell_invalid_item; Invalid_action_sell_not_owned; Invalid_action_sell_already_sold; Invalid_action_sell_gold_overflow; Invalid_action_sell_not_on_spawn ]
+  let all = [ Success; Invalid_handle; Out_of_memory; File_not_found; Null_pointer; Invalid_argument; Map_parse_error; Invalid_map_file; Invalid_map_version; Replay_parse_error; Invalid_replay_file; Invalid_replay_version; Invalid_draft; Draft_not_drafting; Draft_duplicate_champion; Draft_invalid_round; Draft_unavailable; Already_initialized; Invalid_action; Invalid_action_memory_bad_range; Invalid_action_memory_draft_frozen; Invalid_action_move_cant_move; Invalid_action_move_bad_destination; Invalid_action_spell_cast_invalid_source; Invalid_action_spell_cast_invalid_slot; Invalid_action_spell_cast_no_ability; Invalid_action_spell_cast_cant_cast; Invalid_action_spell_cast_already_cast; Invalid_action_spell_cast_on_cooldown; Invalid_action_spell_cast_no_charges; Invalid_action_spell_cast_bad_target; Invalid_action_spell_cast_out_of_range; Invalid_action_spell_cast_bad_destination; Invalid_action_cant_act; Invalid_action_is_recalling; Invalid_action_is_submitting_gems; Invalid_action_move_already_moved; Invalid_action_move_out_of_range; Invalid_action_move_unreachable; Invalid_action_attack_invalid_source; Invalid_action_attack_cant_attack; Invalid_action_attack_already_attacked; Invalid_action_attack_bad_target; Invalid_action_attack_out_of_range; Invalid_action_recall_cant_channel; Invalid_action_submit_gems_cant_channel; Invalid_action_submit_gems_no_gems; Invalid_action_submit_gems_bad_altar; Invalid_action_submit_gems_out_of_range; Invalid_action_buy_item_not_on_spawn; Invalid_action_buy_item_invalid_item; Invalid_action_buy_item_invalid_count; Invalid_action_buy_item_not_enough_gold; Invalid_action_buy_item_inventory_full; Invalid_action_buy_item_stats_overflow; Invalid_action_buy_consumable_not_on_spawn; Invalid_action_buy_consumable_invalid_type; Invalid_action_buy_consumable_invalid_count; Invalid_action_buy_consumable_inventory_full; Invalid_action_buy_consumable_not_enough_gold; Invalid_action_use_consumable_invalid_type; Invalid_action_use_consumable_not_owned; Invalid_action_place_ward_no_charges; Invalid_action_place_ward_cant_place; Invalid_action_place_ward_bad_destination; Invalid_action_place_ward_out_of_range; Map_set_team_aspawn_area_bad_position; Map_add_bush_bad_position; Map_remove_bush_bad_position; Map_add_wall_bad_position; Map_remove_wall_bad_position; Map_add_hole_bad_position; Map_remove_hole_bad_position; Map_add_altar_bad_position; Map_remove_altar_bad_position; Map_get_bush_bad_position; Map_get_wall_bad_position; Map_get_hole_bad_position; Map_get_altar_bad_position; Map_get_camp_handle_at_bad_position; Map_add_camp_bad_position; Map_set_camp_bad_position; Invalid_action_champion_teleport_bad_destination; Invalid_action_respawn_group_blocked_spawn; Invalid_action_camp_teleport_bad_destination; Timeline_bad_seek_position; Timeline_bad_seek_substep; Api_no_map; Managed_resources_bad_position; Managed_resources_bad_radius; Managed_resources_aliasing; Managed_resources_metadata_mismatch; Managed_resources_opaque_origin; Api_invalid_team; Api_invalid_perspective; Api_not_initialized; Api_bad_position; Api_not_in_vision; Api_not_found; Api_invalid_camp_group; Api_invalid_camp_info; Api_invalid_camp; Api_invalid_champion; Api_invalid_ward; Api_invalid_ability; Api_not_teammate; Api_camp_group_not_waiting_to_respawn; Api_champion_alive; Api_invalid_champion_type; Api_invalid_camp_type; Api_value_out_of_range; Api_buffer_too_small; Api_not_owner; Invalid_action_recall_already_used; Invalid_action_submit_gems_already_used; Invalid_action_cancel_channel_not_channeling; Invalid_action_cancel_channel_already_used; Invalid_action_place_ward_ally_ward_present; Invalid_action_altar_lock_bad_altar; Invalid_action_altar_lock_out_of_range; Invalid_action_altar_lock_already_locked; Invalid_action_is_teleporting; Invalid_action_cancel_channel_not_cancellable; Invalid_action_submit_gems_altar_locked; Invalid_action_spell_cast_already_moved; Invalid_action_move_exclusive_spell_cast; Invalid_action_sell_not_tavi; Invalid_action_sell_invalid_item; Invalid_action_sell_not_owned; Invalid_action_sell_already_sold; Invalid_action_sell_gold_overflow; Invalid_action_sell_not_on_spawn; Draft_already_picked; Draft_no_champion_selected ]
   let of_int = function
     | 0 -> Success
     | 1 -> Invalid_handle
@@ -916,6 +937,8 @@ module Error_code = struct
     | 131 -> Invalid_action_sell_already_sold
     | 132 -> Invalid_action_sell_gold_overflow
     | 133 -> Invalid_action_sell_not_on_spawn
+    | 134 -> Draft_already_picked
+    | 135 -> Draft_no_champion_selected
     | n -> Unknown n
   let to_string = function
     | Success -> "Success"
@@ -1050,6 +1073,8 @@ module Error_code = struct
     | Invalid_action_sell_already_sold -> "Invalid_action_sell_already_sold"
     | Invalid_action_sell_gold_overflow -> "Invalid_action_sell_gold_overflow"
     | Invalid_action_sell_not_on_spawn -> "Invalid_action_sell_not_on_spawn"
+    | Draft_already_picked -> "Draft_already_picked"
+    | Draft_no_champion_selected -> "Draft_no_champion_selected"
     | Unknown n -> "Unknown " ^ string_of_int n
 end
 
@@ -1278,11 +1303,13 @@ module Constants = struct
   let get () = Lazy.force cached
 
   module Passive_abilities = struct
-    let prism_focus_per_gem = 0.2
+    let prism_focus_per_gem = 1.0
     let varg_splash_radius = 1.0
-    let vesper_vale_bonus_gold_percent = 20
+    let vesper_vale_bonus_gold_percent = 33
+    let marcella_tribute_gold_per_gem = 2
     let ryth_health_strength_ratio = 0.01
     let ren_retaliation_focus_ratio = 0.2
+    let heart_of_ruin_missing_health_damage_max_bonus = 0.5
   end
 end
 
@@ -1621,7 +1648,7 @@ module Ability_info = struct
       }
     | Cc of { properties : properties; range : float; modifier : float; duration : int }
     | Heal of { properties : properties; range : float; modifier : float }
-    | Dash of { properties : properties; range : float }
+    | Dash of { properties : properties; range : float; radius : float; modifier : float; duration : int }
     | Shield of { properties : properties; range : float; modifier : float; duration : int }
 
   let decode o =
@@ -1642,7 +1669,7 @@ module Ability_info = struct
                Aoe_damage { properties; range; radius = f32 (p 1); modifier = f32 (p 2); duration = i32 (p 3) }
            | Ability_kind.Cc -> Cc { properties; range; modifier; duration = i32 (p 2) }
            | Ability_kind.Heal -> Heal { properties; range; modifier }
-           | Ability_kind.Dash -> Dash { properties; range }
+           | Ability_kind.Dash -> Dash { properties; range; radius = f32 (p 1); modifier = f32 (p 2); duration = i32 (p 3) }
            | Ability_kind.Shield -> Shield { properties; range; modifier; duration = i32 (p 2) })
 end
 
@@ -1655,6 +1682,7 @@ let design_error () = raise Missing_identity
 let owner_of = function Some h -> h | None -> design_error ()
 
 let champion_raw h = check (Sys.champion h rec_); rec_
+let champion_identity_raw h = check (Sys.champion_identity h rec_); rec_
 
 let live_champion_state h = Champion_state.of_bits (i32 (champion_raw h + 40))
 
@@ -1680,7 +1708,7 @@ let draw_cheb p r =
 let champion_name c =
   match c with
   | { design = Some k; _ } | { known = Some k; _ } -> k
-  | { handle = Some h; _ } -> Champion_type.of_int (i32 (champion_raw h + 4))
+  | { handle = Some h; _ } -> Champion_type.of_int (i32 (champion_identity_raw h + 4))
   | _ -> design_error ()
 
 let hypothetical_vision_into kind (p : Vec2.t) out =
@@ -1788,14 +1816,17 @@ module Ability = struct
 end
 
 module Ward = struct
-  type t = { position : Vec2.t; team : Team.t; remaining_time : int option }
+  type t = { position : Vec2.t; team : Team.t; remaining_time : int option; owner : champion }
+  let owner (w : t) = w.owner
   let is_ally w = w.team = Team.Ally
   let is_enemy w = w.team = Team.Enemy
 
   let decode o =
     let timer = i32 (o + 12) in
-    { position = Vec2.make (i32 (o + 4)) (i32 (o + 8)); team = team_of_abs (i32 o);
-      remaining_time = (if timer < 0 then None else Some timer) }
+    let position = Vec2.make (i32 (o + 4)) (i32 (o + 8)) in
+    let team = team_of_abs (i32 o) in
+    let owner = make_champion (u32 (o + 20)) in
+    { position; team; remaining_time = (if timer < 0 then None else Some timer); owner }
 
   let visible_tiles_from_into (p : Vec2.t) out =
     Bitboard.query_into (Sys.board_ward_vision_mask p.x p.y) out
@@ -2053,7 +2084,7 @@ module Champion = struct
   let h c = owner_of c.handle
   let champion_name = champion_name
   let passive c = Passive.of_int (Sys.ld8 (champion_design_raw (champion_name c) + 8))
-  let team c = team_of_abs (i32 (champion_raw (h c)))
+  let team c = team_of_abs (i32 (champion_identity_raw (h c)))
   let is_ally c = team c = Team.Ally
   let is_enemy c = team c = Team.Enemy
 
@@ -2180,21 +2211,19 @@ module Champion = struct
         (fun query -> Bitboard.query_into query temp; Bitboard.union_assign blocked temp)
         [ Sys.board_ally_occupancy; Sys.board_enemy_occupancy; Sys.camp_occupancy; Sys.board_teleport_occupancy ];
       Bitboard.set blocked origin false;
-      if Bitboard.is_set blocked target then false
-      else begin
-        let roots = Bitboard.create () in
-        Bitboard.set roots target true;
-        let destinations = Bitboard.create () in
-        Bitboard.set destinations origin true;
-        let distances = Distance_field.create () in
-        Distance_field.compute distances ~walls:blocked ~roots ~destinations ~visited:(Bitboard.create ())
-          ~max_distance:Distance_field.unreachable;
-        let closer best tile =
-          if Distance_field.get distances tile < Distance_field.get distances best then tile else best in
-        let reachable = Bitboard.reachable_tiles blocked origin ~distance:(base_stats c).base_move_speed in
-        let best = List.fold_left closer origin (Bitboard.positions reachable) in
-        (not (Vec2.equal best origin)) && move_absolute c best
-      end
+      Bitboard.set blocked target false;
+      let roots = Bitboard.create () in
+      Bitboard.set roots target true;
+      let destinations = Bitboard.create () in
+      Bitboard.set destinations origin true;
+      let distances = Distance_field.create () in
+      Distance_field.compute distances ~walls:blocked ~roots ~destinations ~visited:(Bitboard.create ())
+        ~max_distance:Distance_field.unreachable;
+      let closer best tile =
+        if Distance_field.get distances tile < Distance_field.get distances best then tile else best in
+      let reachable = Bitboard.reachable_tiles blocked origin ~distance:(base_stats c).base_move_speed in
+      let best = List.fold_left closer origin (Bitboard.positions reachable) in
+      (not (Vec2.equal best origin)) && move_absolute c best
     end
   let recall c = ignore (h c); check (Sys.recall 0)
 
@@ -2279,6 +2308,7 @@ module Camp = struct
   let is_gem_cluster c = kind c = Camp_type.Gem_cluster
   let is_gold_cluster c = kind c = Camp_type.Gold_cluster
   let is_monolith c = kind c = Camp_type.Monolith
+  let is_golem c = kind c = Camp_type.Golem
   let spawn_position c = c.spawn
 
   let camp_group c =
@@ -2332,11 +2362,16 @@ module Game_map = struct
 end
 
 module Vision = struct
+  let in_vision (p : Vec2.t) = query_bool (Sys.is_visible p.x p.y)
   let visible_tiles_into out = Bitboard.query_into Sys.board_vision out
   let visible_tiles () = let out = Bitboard.create () in visible_tiles_into out; out
 
   let camp_tiles_into out = Bitboard.query_into Sys.camp_occupancy out
   let camp_tiles () = let out = Bitboard.create () in camp_tiles_into out; out
+  let awake_camp_tiles_into out = Bitboard.query_into Sys.awake_camp_occupancy out
+  let awake_camp_tiles () = let out = Bitboard.create () in awake_camp_tiles_into out; out
+  let asleep_camp_tiles_into out = Bitboard.query_into Sys.asleep_camp_occupancy out
+  let asleep_camp_tiles () = let out = Bitboard.create () in asleep_camp_tiles_into out; out
 
   let teleport_tiles_into out = Bitboard.query_into Sys.board_teleport_occupancy out
   let teleport_tiles () = let out = Bitboard.create () in teleport_tiles_into out; out
@@ -2398,7 +2433,7 @@ module Vision = struct
   let wards ?team () =
     List.filter
       (fun (w : Ward.t) -> match team with None -> true | Some t -> w.team = t)
-      (List.map Ward.decode (host_list 20 Sys.wards))
+      (List.map Ward.decode (host_list 24 Sys.wards))
 
   let ward_handle ?team (p : Vec2.t) =
     let f = match team with None -> Sys.ward_at | Some Team.Ally -> Sys.ally_ward_at | Some Team.Enemy -> Sys.enemy_ward_at in

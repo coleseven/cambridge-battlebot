@@ -14,12 +14,14 @@
 #include "bot.h"
 #include "director.h"
 #include "fighter.h"
+#include "genome.h"
 #include "params.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -39,6 +41,7 @@ namespace {
 
 constexpr std::uint16_t UNREACH = c::distance_field::unreachable;
 constexpr int CAPTURE_ROUNDS = 5;
+constexpr int CAMP_REACH = 5;   // camps hit up to 5 tiles away (20 Oct patch: elk/golem 4, monolith 5)
 const char* g_stage = "";   // last stage reached this turn (fuel probe)
 std::uint64_t g_pre = 0;     // fuel left when the fighter started (fuel probe)
 
@@ -47,9 +50,10 @@ MonsterStats monster_stats(c::camp_type t) {
     switch (t) {
     case c::camp_type::wolf: return {1350, 20};
     case c::camp_type::elk: return {2400, 60};
-    case c::camp_type::gem_cluster: return {500, 0};
-    case c::camp_type::gold_cluster: return {500, 0};
+    case c::camp_type::gem_cluster: return {120, 0};      // 20 Oct patch: 500 -> 120 HP
+    case c::camp_type::gold_cluster: return {120, 0};
     case c::camp_type::monolith: return {20000, 200};
+    case c::camp_type::golem: return {5000, 120};         // new camp in the 20 Oct patch
     }
     return {1000, 20};
 }
@@ -192,10 +196,14 @@ void build_fields(std::uint64_t reserve) {
         for (int i = 0; i < static_cast<int>(W.groups.size()); ++i) order.push_back(i);
         std::sort(order.begin(), order.end(), [](int a, int b) { return W.groups[a].home_d < W.groups[b].home_d; });
     }
-    // Budget by the most expensive field so far (+50%): fields to far groups on big maps cost several times
-    // a near one, and running out suspends the bot into its next turn.
+    // A fixed number per turn (FIELDS_PER_TURN), so play never depends on how much fuel the rest of the turn
+    // used: with "build while fuel lasts" any extra work (e.g. the learned director) changed which camp
+    // distances were exact and so the targets (20 Oct). The fuel test is only an emergency brake (the most
+    // expensive field so far must fit above the reserve), since running out suspends the bot into its next turn.
     static std::uint64_t max_cost = 12000;
-    while (W.next_field < order.size() && c::fuel_remaining() > reserve + max_cost + max_cost / 2) {
+    int built = 0;
+    while (W.next_field < order.size() && built++ < FIELDS_PER_TURN &&
+           c::fuel_remaining() > reserve + max_cost) {
         const auto f0 = c::fuel_remaining();
         auto& g = W.groups[order[W.next_field++]];
         if (!g.field) g.field = make_field(g.tile_bb);
@@ -591,6 +599,104 @@ bool scripted_fight(const std::vector<c::champion>& enemies, vec2 pos) {
     return me.can_attack() || me.position() != pos || !W.ranged;
 }
 
+// ---------- learned director (docs/DIRECTOR.md, "Learned director") ----------
+// A NEAT network scores candidate orders from features; its program sits in the genome blob at word
+// DIRN_BLOCK ('DIRN', input count, then the fighter's program format with hidden slots from NFD). Without the
+// block (or with LEARNED_DIRECTOR = 0) the rule cascade decides, exactly as before. Feature 0 is "the rule
+// cascade chose this", so a network weighting it alone plays exactly like the rules (the training warm start).
+constexpr std::uint32_t DIRN_BLOCK = 15000;
+constexpr std::uint32_t DIRN_MAGIC = 0x4E524944u;   // 'DIRN'
+constexpr int NFD = 25;
+constexpr int DN_MAX_NODES = 64;
+struct DEval { int node, act; float bias, resp; int first, count; };
+struct DNet { bool ok = false; std::vector<DEval> evals; std::vector<std::pair<int, float>> links; int out = 0; };
+DNet DN;
+bool DN_loaded = false;
+
+float dword_float(std::uint32_t w) { float f; std::memcpy(&f, &w, 4); return f; }
+
+void load_dnet() {
+    DN_loaded = true;
+    std::uint32_t o = DIRN_BLOCK;
+    if (o + 3 >= GENOME_WORDS || GENOME_BLOB[o] != DIRN_MAGIC || GENOME_BLOB[o + 1] != static_cast<std::uint32_t>(NFD)) return;
+    o += 2;
+    const std::uint32_t n = GENOME_BLOB[o++];
+    if (n == 0 || n > static_cast<std::uint32_t>(DN_MAX_NODES)) return;
+    const int max_slot = NFD + DN_MAX_NODES;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (o + 5 >= GENOME_WORDS) return;
+        DEval e{};
+        e.node = static_cast<int>(GENOME_BLOB[o++]);
+        e.act = static_cast<int>(GENOME_BLOB[o++]);
+        e.bias = dword_float(GENOME_BLOB[o++]);
+        e.resp = dword_float(GENOME_BLOB[o++]);
+        e.count = static_cast<int>(GENOME_BLOB[o++]);
+        e.first = static_cast<int>(DN.links.size());
+        if (e.node < NFD || e.node >= max_slot || e.count < 0 || e.count > 400) return;
+        for (int k = 0; k < e.count; ++k) {
+            if (o + 1 >= GENOME_WORDS) return;
+            const int src = static_cast<int>(GENOME_BLOB[o++]);
+            const float w = dword_float(GENOME_BLOB[o++]);
+            if (src < 0 || src >= max_slot) return;
+            DN.links.push_back({src, w});
+        }
+        DN.evals.push_back(e);
+    }
+    DN.out = static_cast<int>(GENOME_BLOB[o]);
+    DN.ok = DN.out >= 0 && DN.out < max_slot;
+}
+
+float run_dnet(const float* x) {
+    float v[NFD + DN_MAX_NODES];
+    for (int i = 0; i < NFD; ++i) v[i] = x[i];
+    for (int i = NFD; i < NFD + DN_MAX_NODES; ++i) v[i] = 0.0f;
+    for (const auto& e : DN.evals) {
+        float s = 0.0f;
+        for (int k = 0; k < e.count; ++k) s += v[DN.links[e.first + k].first] * DN.links[e.first + k].second;
+        float z = e.bias + e.resp * s;
+        switch (e.act) {
+        case 1: z = std::tanh(std::clamp(2.5f * z, -60.0f, 60.0f)); break;
+        case 2: z = 1.0f / (1.0f + std::exp(-std::clamp(5.0f * z, -60.0f, 60.0f))); break;
+        case 3: z = z > 0 ? z : 0.0f; break;
+        default: break;
+        }
+        v[e.node] = z;
+    }
+    return v[DN.out];
+}
+
+// Farm features per group (the rule scorer's terms, same formula as choose_target).
+struct GroupScore { int i; float s, d, value, wait, kill, dmg_frac; int claimed; };
+std::vector<GroupScore> score_groups(vec2 pos, int round, float hp, const Comms& cm) {
+    const int my_squad = squad_of(W.body);
+    int k = 0;
+    for (int b = 0; b < W.bodies; ++b) if (squad_of(b) == my_squad) ++k;
+    const float dps = my_dps();
+    const float dmg_mult = (FIRST_EMBLEM == 1 && W.emblem_shards >= 5) ? 0.7f : 1.0f;
+    const float squad_dps = dps * (1.0f + SQUAD_DPS_SHARE * (k - 1));
+    const float tank_budget = std::max(1.0f, SAFE_DAMAGE_FRAC * hp * (1.0f + 0.5f * (k - 1)));
+    const bool fight_fresh = round - W.fight_round <= 10;
+    std::vector<GroupScore> out;
+    for (int i = 0; i < static_cast<int>(W.groups.size()); ++i) {
+        const auto& g = W.groups[i];
+        const int d = group_dist(g, pos);
+        if (d >= UNREACH) continue;
+        int n_other = 0;
+        for (int b = 0; b < W.bodies && b < 6; ++b)
+            if (b != W.body && cm.claim(b) == i + 1) ++n_other;
+        const float kill = g.reward_known ? 0.0f : g.hp_total / squad_dps;
+        const float dmg = g.reward_known ? 0.0f : g.dmg_full / squad_dps * dmg_mult;
+        const float wait = static_cast<float>(std::max(0, g.ready_round - (round + d)));
+        const float side = std::max(0, g.home_d - g.enemy_d) * ENEMY_SIDE_WEIGHT;
+        const float sight = fight_fresh && SIGHT_COST > 0 && chebyshev(g.anchor, W.fight) <= SIGHT_RADIUS ? SIGHT_COST : 0.0f;
+        const float value = g.gems + GOLD_WEIGHT * g.gold;
+        const float cost = d + wait + kill + CAPTURE_ROUNDS + CLAIM_PENALTY * n_other + side + sight;
+        out.push_back({i, value / std::max(cost, 1.0f), static_cast<float>(d), value, wait, kill,
+                       std::min(3.0f, dmg / tank_budget), n_other});
+    }
+    return out;
+}
+
 const c::distance_field* point_field(vec2 p, int radius) {
     if (!W.fight_field || W.fight_field_at != p) {
         c::bitboard roots;
@@ -707,6 +813,89 @@ void play_turn_inner() {
                        : (!g.reward_known && g.ready_round > round) ? Mode::wait : Mode::farm;
         }
     }
+    // ---- learned director: re-rank the candidate orders (the rule choice is one of them, flagged) ----
+    if (LEARNED_DIRECTOR) {
+        if (!DN_loaded) load_dnet();
+        // The candidates and features are built with or without a network, so the rule-only build spends the
+        // same fuel and differs from a network build only in the decision (fuel-dependent brakes elsewhere
+        // would otherwise make a warm-start network play different games from the rules).
+        {
+            struct Cand { Mode mode; int group; float x[NFD]; };
+            std::vector<Cand> cands;
+            const Mode rule_mode = (order.mode == Mode::capture || order.mode == Mode::wait) ? Mode::farm : order.mode;
+            const int rule_group = order.group;
+            float ctx[8];
+            const int enemy_total = static_cast<int>(c::global_submitted_gems(team::enemy));
+            ctx[0] = hp / std::max(1.0f, maxhp);
+            ctx[1] = gems / 50.0f;
+            ctx[2] = me.gold_count() / 100.0f;
+            ctx[3] = std::min(altar_d, 60) / 30.0f;
+            ctx[4] = std::min(fget(W.home_field.get(), pos), 60) / 30.0f;
+            ctx[5] = round / 2000.0f;
+            ctx[6] = (team_total - enemy_total) / 1000.0f;
+            ctx[7] = std::min(nearest_d, 10) / 10.0f;
+            auto add = [&](Mode m, int grp, const GroupScore* gs, float best_s) {
+                Cand cd{m, grp, {}};
+                float* x = cd.x;
+                x[0] = (m == rule_mode && grp == rule_group) ? 1.0f : 0.0f;
+                x[1] = m == Mode::farm; x[2] = m == Mode::bank; x[3] = m == Mode::heal; x[4] = m == Mode::shop;
+                x[5] = m == Mode::join; x[6] = m == Mode::intercept; x[7] = m == Mode::none;
+                if (gs) {
+                    x[8] = best_s > 0 ? gs->s / best_s : 0.0f;
+                    x[9] = std::min(gs->d, 60.0f) / 30.0f;
+                    x[10] = gs->value / 50.0f;
+                    x[11] = std::min(gs->wait, 60.0f) / 30.0f;
+                    x[12] = gs->dmg_frac;
+                    x[13] = static_cast<float>(gs->claimed);
+                    x[14] = grp == W.target ? 1.0f : 0.0f;
+                    x[15] = std::max(0, W.groups[grp].home_d - W.groups[grp].enemy_d) / 30.0f;
+                    x[16] = (round - W.fight_round <= 10 && chebyshev(W.groups[grp].anchor, W.fight) <= SIGHT_RADIUS) ? 1.0f : 0.0f;
+                }
+                for (int i = 0; i < 8; ++i) x[17 + i] = ctx[i];
+                cands.push_back(cd);
+            };
+            auto scores = score_groups(pos, round, hp, cm);
+            std::sort(scores.begin(), scores.end(), [](const GroupScore& a, const GroupScore& b) { return a.s > b.s; });
+            const float best_s = scores.empty() ? 0.0f : scores[0].s;
+            for (std::size_t i = 0; i < scores.size(); ++i)
+                if (i < 5 || scores[i].i == W.target || scores[i].i == rule_group) add(Mode::farm, scores[i].i, &scores[i], best_s);
+            if (gems > 0) add(Mode::bank, -1, nullptr, 0);
+            if (hp < maxhp * (at_spawn ? 0.95f : 1.0f)) add(Mode::heal, -1, nullptr, 0);
+            if (!at_spawn && gems == 0 && me.gold_count() >= 30) add(Mode::shop, -1, nullptr, 0);
+            if (round - W.fight_round <= 1 && in_bounds(W.fight) && !contact) add(Mode::join, -1, nullptr, 0);
+            if (tribute) add(Mode::intercept, -1, nullptr, 0);
+            add(Mode::none, -1, nullptr, 0);
+            const Cand* best = nullptr;
+            float best_v = 0;
+            for (const auto& cd : cands) {
+                const float v = DN.ok ? run_dnet(cd.x) : cd.x[0];      // no network: the rule choice
+                if (!best || v > best_v) { best = &cd; best_v = v; }
+            }
+            if (best && !(best->mode == rule_mode && best->group == rule_group)) {
+                Order o;
+                o.mode = best->mode;
+                switch (best->mode) {
+                case Mode::farm: {
+                    auto& g = W.groups[best->group];
+                    if (!g.field && !contact) g.field = make_field(g.tile_bb);
+                    W.target = best->group;
+                    o.group = best->group;
+                    o.goal = g.field.get();
+                    o.mode = g.reward_known && g.tile_bb.is_set(pos) ? Mode::capture
+                           : (!g.reward_known && g.ready_round > round) ? Mode::wait : Mode::farm;
+                    if (!g.field) o.mode = Mode::none;          // a fight turn without the group's field yet
+                    break;
+                }
+                case Mode::bank: o.goal = W.altar_field.get(); break;
+                case Mode::heal: case Mode::shop: o.goal = W.home_field.get(); break;
+                case Mode::join: o.point = W.fight; break;
+                case Mode::intercept: o.point = tribute->position(); break;
+                default: break;
+                }
+                order = o;
+            }
+        }
+    }
     const int claim = order.group >= 0 ? order.group : -1;
 
     g_stage = "gate";
@@ -770,7 +959,7 @@ void play_turn_inner() {
         bool hot = nearest_d <= 5;
         vec2 threat = nearest_d < 99 ? nearest_pos : pos;
         for (auto p : c::vision::camp_tiles().positions())
-            if (chebyshev(pos, p) <= 3) { hot = true; threat = p; break; }
+            if (chebyshev(pos, p) <= CAMP_REACH) { hot = true; threat = p; break; }
         if (fget(W.home_field.get(), pos) <= WALK_HOME_DIST || hot) {
             if (hot && threat != pos) step_away(threat);
             else step_along(*W.home_field);

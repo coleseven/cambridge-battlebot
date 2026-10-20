@@ -31,6 +31,15 @@ constexpr int NN_HEROES = 1024;   // 19 Oct: Varg only (+0.390, 62/114 vs forage
 // the goal stays off until real-map training runs with it on.
 constexpr int ORDER_GOAL = 0;
 
+// --- Fuel ---
+// Per-group distance fields built per quiet turn (deterministic: never "while fuel lasts").
+constexpr int FIELDS_PER_TURN = 8;   // 20 Oct, 21 maps: 3 -> +0.318, 8 -> +0.375, 20 -> +0.376
+
+// --- Learned director ---
+// 1 = a director network in the genome blob ('DIRN' block, tools/director_train.py) re-ranks the candidate
+// orders; without the block the rule cascade below decides, exactly as before. 0 = rules only.
+constexpr int LEARNED_DIRECTOR = 1;
+
 // --- Engage gate (in contact: fight with the fighter, ignore and keep the order, or flee) ---
 // 1 = decide per contact (the forager's tuned rules below); 0 = the fighter takes every contact turn.
 // 19 Oct, held-out maps: the forager without a fighter (these rules) +0.487, every-contact fighter +0.395.

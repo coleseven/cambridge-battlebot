@@ -11,6 +11,8 @@ Sources: champ:<N> (N-v-N champion set), neat:<run>, cgp:<run>, prior (hand prio
 tools/tune.py can then CMA-ES the strategy numbers in bots/<out>/src/params.h with the fighter attached.
 """
 import argparse
+import json
+import struct
 import re
 import shutil
 import sys
@@ -211,6 +213,8 @@ def main():
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--engage-range", type=int, default=4)
     ap.add_argument("--win-model", type=int, default=0)
+    ap.add_argument("--director-net", default="", metavar="best.json",
+                    help="director sources: bake a learned director network (tools/director_train.py best.json)")
     ap.add_argument("--runtime-params", default="", metavar="SPACE.json",
                     help="director sources: make these params (a CMA-ES space file) loadable from the genome blob")
     ap.add_argument("--set", nargs="*", default=[], metavar="NAME=VALUE",
@@ -242,7 +246,6 @@ def main():
             sys.exit(f"--set: {k} not found in params.h")
         pp.write_text(text, encoding="utf-8")
     if a.runtime_params:
-        import json
         names = list(json.loads(Path(a.runtime_params).read_text(encoding="utf-8")))
         text, loader = runtime_params(pp.read_text(encoding="utf-8"), names)
         pp.write_text(text, encoding="utf-8")
@@ -259,6 +262,11 @@ def main():
     else:
         progs = league.programs(a.source, 3)
     _, words = bf.blob_words(progs, 0)
+    if a.director_net:
+        import director_train as dt
+        net = json.loads(Path(a.director_net).read_text(encoding="utf-8"))
+        data = dt.with_director(struct.pack(f"<{len(words)}I", *words), net["words"])
+        words = list(struct.unpack(f"<{len(data) // 4}I", data))
     heroes = ", ".join(nvn.PICKS[p] for p in sorted(progs)) or "none (hand prior)"
     (out / "src" / "genome.cpp").write_text(bf.genome_cpp(words, f"team bot, source {a.source}, networks: {heroes}"),
                                             encoding="utf-8")

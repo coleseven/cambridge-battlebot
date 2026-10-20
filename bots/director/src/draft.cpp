@@ -13,11 +13,21 @@ using cambc::champion_draft;
 
 namespace {
 // Ladder meta (14 Oct): Varg, C&I, Stellar, Ren, Tavi/Ryth dominate the top 15 (same table as the forager).
-constexpr std::array<std::array<champion_draft, 5>, 4> COMPS{{
-    {champion_draft::varg, champion_draft::cassi_and_issac, champion_draft::stellar, champion_draft::ren, champion_draft::tavi},
-    {champion_draft::cassi_and_issac, champion_draft::varg, champion_draft::stellar, champion_draft::ren, champion_draft::ryth},
-    {champion_draft::varg, champion_draft::stellar, champion_draft::ren, champion_draft::ryth, champion_draft::vendetta},
-    {champion_draft::cassi_and_issac, champion_draft::stellar, champion_draft::ren, champion_draft::varg, champion_draft::prism},
+// 0-3: pre-patch ladder meta. 4-9: candidates after the 20 Oct patch (meta comp nerfed; Vesper +33% gold and
+// Marcella 2 gold per tributed gem matter now that many games reach round 2,000 and lifetime gold breaks ties;
+// Willow buffed; Heart of Ruin new). On 3- and 4-champion maps only the first picks are used.
+using D = champion_draft;
+constexpr std::array<std::array<champion_draft, 5>, 10> COMPS{{
+    {D::varg, D::cassi_and_issac, D::stellar, D::ren, D::tavi},
+    {D::cassi_and_issac, D::varg, D::stellar, D::ren, D::ryth},
+    {D::varg, D::stellar, D::ren, D::ryth, D::vendetta},
+    {D::cassi_and_issac, D::stellar, D::ren, D::varg, D::prism},
+    {D::varg, D::cassi_and_issac, D::marcella, D::vesper_vale, D::willow},
+    {D::cassi_and_issac, D::marcella, D::ryth, D::vesper_vale, D::tavi},
+    {D::heart_of_ruin, D::cassi_and_issac, D::varg, D::willow, D::vesper_vale},
+    {D::marcella, D::vesper_vale, D::willow, D::ryth, D::varg},
+    {D::cassi_and_issac, D::varg, D::ren, D::willow, D::marcella},
+    {D::vesper_vale, D::marcella, D::cassi_and_issac, D::stellar, D::heart_of_ruin},
 }};
 
 // Physical body types created by a draft pick (C&I creates two bodies).
@@ -39,6 +49,7 @@ void push_bodies(champion_draft pick, std::vector<std::byte>& out) {
     case champion_draft::ren: out.push_back(t(champion_type::ren)); break;
     case champion_draft::varg: out.push_back(t(champion_type::varg)); break;
     case champion_draft::tavi: out.push_back(t(champion_type::tavi)); break;
+    case champion_draft::heart_of_ruin: out.push_back(t(champion_type::heart_of_ruin)); break;
     }
 }
 } // namespace

@@ -33,7 +33,7 @@ constexpr int ORDER_GOAL = 0;
 
 // --- Fuel ---
 // Per-group distance fields built per quiet turn (deterministic: never "while fuel lasts").
-constexpr int FIELDS_PER_TURN = 3;
+constexpr int FIELDS_PER_TURN = 8;   // 20 Oct, 21 maps: 3 -> +0.318, 8 -> +0.375, 20 -> +0.376
 
 // --- Learned director ---
 // 1 = a director network in the genome blob ('DIRN' block, tools/director_train.py) re-ranks the candidate

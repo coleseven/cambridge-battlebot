@@ -8,7 +8,7 @@ and evolution keeps only what wins more. The fighter networks and director param
 
   .venv/Scripts/python tools/team_bot.py --macro-src bots/director/src --source neat:real1 --out team-dirlearn --build
   .venv/Scripts/python tools/director_train.py run d1 [--team team-dirlearn] [--fighters neat:real1] [--pop 20]
-        [--games 6] [--opps rules sparring-tarot v1 forager starter-cpp] [--jobs 12] [--until 11:50] [--dist .arena/dist]
+        [--games 16] [--opps rules sparring-tarot v1 forager starter-cpp] [--jobs 12] [--until 11:50] [--dist .arena/dist]
   .venv/Scripts/python tools/director_train.py status d1
 Outputs in .arena/director/<name>/: state.pkl, log.jsonl, best.json (+ snapshots/gen####.json): the program
 words of the generation's best network, for tools/team_bot.py --director-net.
@@ -85,9 +85,16 @@ def seed(pop, config, rng):
         node.bias, node.response, node.activation = 0.0, 1.0, "identity"
 
 
-def schedule(gen, k, opps, maps):
+def schedule(gen, k, opps, maps, rules_share=0.5):
+    """k (map, opponent) entries; about rules_share of them against the rule director when it is in the pool
+    (beating it is the point), the rest spread over the other opponents."""
     rng = random.Random(f"dir:{gen}")
-    return [(rng.choice(maps), rng.choice(opps)) for _ in range(k)]
+    others = [o for o in opps if o != "rules"] or opps
+    out = []
+    for j in range(k):
+        o = "rules" if "rules" in opps and j < round(rules_share * k) else rng.choice(others)
+        out.append((rng.choice(maps), o))
+    return out
 
 
 def run(a):
@@ -99,13 +106,14 @@ def run(a):
         print(f"resuming director run {a.name} at generation {st['gen']}", flush=True)
     else:
         config = nt.make_config(d, a.pop, "", nin=NFD)
+        config.genome_config.weight_mutate_power = a.mut
         pop = neat.Population(config)
         seed(pop, config, random.Random(1))
         if (d / "team_src").exists():
             shutil.rmtree(d / "team_src")
         shutil.copytree(arena.ROOT / "bots" / a.team / "src", d / "team_src")
         st = {"gen": 0, "pops": {0: pop}, "phase": {0: {"mode": "complexify", "floor": nt.complexity(pop)}},
-              "fighters": a.fighters, "best": None}
+              "fighters": a.fighters, "best": None, "hist": {}}
         nt.save_state(ck, st)
         print(f"director run {a.name}: {a.pop} networks seeded on the rule choice; team source frozen", flush=True)
     pop = st["pops"][0]
@@ -116,6 +124,9 @@ def run(a):
     for o in a.opps:
         if o == "rules":
             opps[o] = dist.virtual_bot(slots[0], fblob, "rules")       # same build, no network: the rule director
+        elif o.startswith("net:"):                                       # a learned director (best.json / snapshot)
+            words = json.loads(Path(o[4:]).read_text(encoding="utf-8"))["words"]
+            opps[o] = dist.virtual_bot(slots[0], with_director(fblob, words), Path(o[4:]).stem)
         else:
             src = arena.ARENA / "realopp" / o
             if not (src / "src").exists():
@@ -153,12 +164,24 @@ def run(a):
             fit.setdefault(gid, []).append(s)
             by_opp.setdefault(oname, []).append(s)
         pre = {gid: sum(v) / len(v) for gid, v in fit.items()}
+        # Lifetime fitness: an elite that survives keeps its key and is re-evaluated every generation; its
+        # fitness is the mean over all its evaluations, so one lucky generation cannot carry it.
+        hist = st.setdefault("hist", {})
+        for gid, v in pre.items():
+            hist.setdefault(gid, []).append(v)
+        live = {gid for gid, _ in items}
+        for gid in list(hist):
+            if gid not in live:
+                del hist[gid]
+        life = {gid: sum(hist[gid]) / len(hist[gid]) for gid in pre}
 
         def assign(genomes, cfg):
             for gid, g in genomes:
-                g.fitness = pre.get(gid, -3.0) - 0.001 * len(g.connections)
-        best_id = max(pre, key=pre.get)
-        st["best"] = {"gen": gen, "fitness": round(pre[best_id], 3), "nfd": NFD, "words": progs[best_id]}
+                g.fitness = life.get(gid, -3.0) - 0.001 * len(g.connections)
+        proven = [gid for gid in pre if len(hist[gid]) >= a.min_evals]
+        best_id = max(proven or pre, key=lambda g: life[g])
+        st["best"] = {"gen": gen, "fitness": round(life[best_id], 3), "evals": len(hist[best_id]),
+                      "nfd": NFD, "words": progs[best_id]}
         pop.run(assign, 1)
         nt.update_phase(st["phase"][0], pop)
         st["gen"] = gen
@@ -194,8 +217,11 @@ def main():
     r.add_argument("--team", default="team-dirlearn", help="generated director bot (team_bot.py) frozen as team_src")
     r.add_argument("--fighters", default="neat:real1", help="fighter networks for every game (league spec)")
     r.add_argument("--pop", type=int, default=20)
-    r.add_argument("--games", type=int, default=6, help="schedule entries per generation (each played both seats)")
-    r.add_argument("--opps", nargs="+", default=["rules", "sparring-tarot", "v1", "forager", "starter-cpp"])
+    r.add_argument("--games", type=int, default=16, help="schedule entries per generation (each played both seats)")
+    r.add_argument("--mut", type=float, default=0.15, help="weight mutation power (neat default here 0.3)")
+    r.add_argument("--min-evals", type=int, default=3, help="evaluations before a network can be exported as best")
+    r.add_argument("--opps", nargs="+", default=["rules", "sparring-tarot", "v1", "forager", "starter-cpp"],
+                   help="opponent pool; 'rules' = the rule director, net:<best.json> = a learned director")
     r.add_argument("--jobs", type=int, default=12)
     r.add_argument("--gens", type=int, default=0, help="0 = run until --until")
     r.add_argument("--until", default="")

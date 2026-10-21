@@ -25,9 +25,10 @@ set /a tries=0
 rem Mode switch: with .arena\night_real.flag present, the night runs real-map fighter training on this PC
 rem instead of being a worker for the training PC. From 20 Oct (post-patch, engine 1.0.0): the learned director,
 rem tools/director_train.py run d1 (bots/team-dirlearn = tools/team_bot.py --macro-src bots/director/src
-rem --source neat:real1 --out team-dirlearn), fighters fixed. Earlier nights: real1 / real2 (tools/real_train.py).
+rem --source neat:real1 --out team-dirlearn), fighters fixed. 21 Oct: run d2 (16 games/candidate/gen, half vs the rules,
+rem lifetime fitness, d1's gen-100 network as an opponent). Earlier: d1, real1 / real2 (tools/real_train.py).
 if exist .arena\night_real.flag (
-  .venv\Scripts\python -u tools\director_train.py run d1 --team team-dirlearn --fighters neat:real1 --pop 20 --games 6 --jobs 12 --until 11:50 --dist .arena/dist >> .arena\director-night.log 2>&1
+  .venv\Scripts\python -u tools\director_train.py run d2 --team team-dirlearn --fighters neat:real1 --pop 16 --games 16 --opps rules net:.arena/director/hall/d1-gen0100.json sparring-tarot v1 forager starter-cpp --jobs 12 --until 11:50 --dist .arena/dist >> .arena\director-night.log 2>&1
 ) else (
   .venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
 )

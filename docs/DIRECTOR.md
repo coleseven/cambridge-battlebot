@@ -168,6 +168,27 @@ heavy turns. Training and shipping use the same code, so that only affects compa
 - Fighters (real1) and params stay fixed. That's the alternating-stage plan: the shared run of 19 Oct improved neither layer.
 - Distributed over both PCs (`--dist`).
 
+**Run d1 (20–21 Oct night)**
+- Setup: 505 generations; population 20; 6 schedule entries, so 12 games per network per generation.
+- The training log looked worse than the rules (−0.37, drifting to −0.84 vs the rule director): too few games per network, so selection rewarded luck.
+- Snapshots baked into bots tell a different story:
+
+| Network | Fitness, 21 maps | Head to head, 21 maps | Fitness, 40 held-out maps | Head to head, 40 held-out maps |
+|---|---:|---:|---:|---:|
+| **gen 100** | **+0.472** | **27/42, +130** | **+0.442** | **50/80, +58** |
+| gen 250 | +0.428 | 19/42 | | |
+| gen 505 | +0.408 | 18/42 | | |
+| rule director | +0.385 | — | +0.369 | — |
+
+Gen 100 is the first measured gain from learning the strategy layer. It is kept as `.arena/director/hall/d1-gen0100.json`.
+
+**Trainer changes for run d2**
+- 16 schedule entries, so 32 games per network per generation.
+- Half of the entries are against the rule director.
+- Lifetime fitness: elites average all their evaluations, and the exported best needs at least 3.
+- Weight mutation power 0.15.
+- Learned opponents (`net:<file>`): d2 has to beat d1's gen-100 network too.
+
 ## What gets learned
 
 | Piece | How |

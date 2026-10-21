@@ -199,11 +199,11 @@ void build_fields(std::uint64_t reserve) {
     // A fixed number per turn (FIELDS_PER_TURN), so play never depends on how much fuel the rest of the turn
     // used: with "build while fuel lasts" any extra work (e.g. the learned director) changed which camp
     // distances were exact and so the targets (20 Oct). The fuel test is only an emergency brake (the most
-    // expensive field so far must fit above the reserve), since running out suspends the bot into its next turn.
+    // expensive field so far +50% must fit above the reserve), since running out suspends the bot into its next turn.
     static std::uint64_t max_cost = 12000;
     int built = 0;
     while (W.next_field < order.size() && built++ < FIELDS_PER_TURN &&
-           c::fuel_remaining() > reserve + max_cost) {
+           c::fuel_remaining() > reserve + max_cost + max_cost / 2) {
         const auto f0 = c::fuel_remaining();
         auto& g = W.groups[order[W.next_field++]];
         if (!g.field) g.field = make_field(g.tile_bb);
@@ -814,7 +814,10 @@ void play_turn_inner() {
         }
     }
     // ---- learned director: re-rank the candidate orders (the rule choice is one of them, flagged) ----
-    if (LEARNED_DIRECTOR) {
+    // Not in contact turns: scoring the candidates costs ~22k fuel (13k for ~20 groups, 9k for the features;
+    // the network itself ~0.3k), and a fight turn already spends 60-85k in the fighter. There the rule order
+    // stands (it mostly sets the fighter's leash). 21 Oct: re-ranking every turn put 0.8% of turns over 90k.
+    if (LEARNED_DIRECTOR && !contact) {
         if (!DN_loaded) load_dnet();
         // The candidates and features are built with or without a network, so the rule-only build spends the
         // same fuel and differs from a network build only in the decision (fuel-dependent brakes elsewhere
@@ -822,6 +825,7 @@ void play_turn_inner() {
         {
             struct Cand { Mode mode; int group; float x[NFD]; };
             std::vector<Cand> cands;
+            cands.reserve(16);            // no reallocation copies of the 100-byte entries
             const Mode rule_mode = (order.mode == Mode::capture || order.mode == Mode::wait) ? Mode::farm : order.mode;
             const int rule_group = order.group;
             float ctx[8];
@@ -854,7 +858,12 @@ void play_turn_inner() {
                 for (int i = 0; i < 8; ++i) x[17 + i] = ctx[i];
                 cands.push_back(cd);
             };
-            auto scores = score_groups(pos, round, hp, cm);
+            // Group scores are reused for SCORE_EVERY turns (~13k fuel to recompute; values and distances drift
+            // slowly). The cache is per body (one instance per body).
+            static std::vector<GroupScore> cached_scores;
+            static int scored_round = -1000;
+            if (round - scored_round >= SCORE_EVERY) { cached_scores = score_groups(pos, round, hp, cm); scored_round = round; }
+            auto scores = cached_scores;
             std::sort(scores.begin(), scores.end(), [](const GroupScore& a, const GroupScore& b) { return a.s > b.s; });
             const float best_s = scores.empty() ? 0.0f : scores[0].s;
             for (std::size_t i = 0; i < scores.size(); ++i)

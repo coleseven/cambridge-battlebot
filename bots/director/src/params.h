@@ -39,6 +39,8 @@ constexpr int FIELDS_PER_TURN = 8;   // 20 Oct, 21 maps: 3 -> +0.318, 8 -> +0.37
 // 1 = a director network in the genome blob ('DIRN' block, tools/director_train.py) re-ranks the candidate
 // orders; without the block the rule cascade below decides, exactly as before. 0 = rules only.
 constexpr int LEARNED_DIRECTOR = 1;
+// Turns the learned director reuses its group scores for (scoring ~20 groups costs ~13k fuel).
+constexpr int SCORE_EVERY = 3;
 
 // --- Engage gate (in contact: fight with the fighter, ignore and keep the order, or flee) ---
 // 1 = decide per contact (the forager's tuned rules below); 0 = the fighter takes every contact turn.

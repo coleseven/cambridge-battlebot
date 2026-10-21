@@ -85,6 +85,58 @@ def seed(pop, config, rng):
         node.bias, node.response, node.activation = 0.0, 1.0, "identity"
 
 
+ACT_NAME = {v: k for k, v in nt.ACT.items()}
+
+
+def genome_from_words(words, config, key):
+    """Rebuild a NEAT genome from program words (the inverse of program()): input slots 0..NFD-1 are input keys
+    -1..-NFD, the output slot is the output key, hidden slots get fresh node keys."""
+    gc = config.genome_config
+    g = config.genome_type(key)
+    g.nodes, g.connections = {}, {}
+    out_key = gc.output_keys[0]
+    n = words[0]
+    o, evals = 1, []
+    for _ in range(n):
+        node, act, bias, resp, k = words[o:o + 5]
+        o += 5
+        links = [(words[o + 2 * j], words[o + 2 * j + 1]) for j in range(k)]
+        o += 2 * k
+        evals.append((node, act, bias, resp, links))
+    out_slot = words[o]
+    slot_key = {i: -i - 1 for i in range(NFD)}
+    slot_key[out_slot] = out_key
+    nxt = max([out_key] + list(gc.output_keys)) + 1
+    for node, *_ in evals:
+        if node not in slot_key:
+            slot_key[node] = nxt
+            nxt += 1
+    f = lambda w: struct.unpack("<f", struct.pack("<I", w))[0]   # noqa: E731
+    for node, act, bias, resp, links in evals:
+        nk = slot_key[node]
+        ng = config.genome_type.create_node(gc, nk)
+        ng.bias, ng.response, ng.activation, ng.aggregation = f(bias), f(resp), ACT_NAME.get(act, "identity"), "sum"
+        g.nodes[nk] = ng
+        for src, w in links:
+            g.add_connection(gc, slot_key[src], nk, f(w), True)
+    if out_key not in g.nodes:
+        ng = config.genome_type.create_node(gc, out_key)
+        ng.bias, ng.response, ng.activation = 0.0, 1.0, "identity"
+        g.nodes[out_key] = ng
+    return g
+
+
+def seed_from(pop, config, words, rng, exact=2):
+    """Warm start from a trained network: `exact` copies of it, the rest mutated copies."""
+    keys = list(pop.population)
+    for j, gid in enumerate(keys):
+        g = genome_from_words(words, config, gid)
+        if j >= exact:
+            g.mutate(config.genome_config)
+        pop.population[gid] = g
+    pop.species.speciate(config, pop.population, pop.generation)
+
+
 def schedule(gen, k, opps, maps, rules_share=0.5):
     """k (map, opponent) entries; about rules_share of them against the rule director when it is in the pool
     (beating it is the point), the rest spread over the other opponents."""
@@ -109,6 +161,13 @@ def run(a):
         config.genome_config.weight_mutate_power = a.mut
         pop = neat.Population(config)
         seed(pop, config, random.Random(1))
+        if a.seed_net:                    # warm start from a trained network instead of the rule choice
+            seed_from(pop, config, json.loads(Path(a.seed_net).read_text(encoding="utf-8"))["words"], random.Random(1))
+            # node keys for later add-node mutations must start above the rebuilt hidden nodes
+            top = max(k for g in pop.population.values() for k in g.nodes)
+            if getattr(config.genome_config, "node_indexer", None) is not None:
+                import itertools
+                config.genome_config.node_indexer = itertools.count(top + 1)
         if (d / "team_src").exists():
             shutil.rmtree(d / "team_src")
         shutil.copytree(arena.ROOT / "bots" / a.team / "src", d / "team_src")
@@ -219,6 +278,7 @@ def main():
     r.add_argument("--pop", type=int, default=20)
     r.add_argument("--games", type=int, default=16, help="schedule entries per generation (each played both seats)")
     r.add_argument("--mut", type=float, default=0.15, help="weight mutation power (neat default here 0.3)")
+    r.add_argument("--seed-net", default="", help="warm start from a trained network (best.json / snapshot)")
     r.add_argument("--min-evals", type=int, default=3, help="evaluations before a network can be exported as best")
     r.add_argument("--opps", nargs="+", default=["rules", "sparring-tarot", "v1", "forager", "starter-cpp"],
                    help="opponent pool; 'rules' = the rule director, net:<best.json> = a learned director")

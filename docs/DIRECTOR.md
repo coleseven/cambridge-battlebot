@@ -189,6 +189,19 @@ Gen 100 is the first measured gain from learning the strategy layer. It is kept 
 - Weight mutation power 0.15.
 - Learned opponents (`net:<file>`): d2 has to beat d1's gen-100 network too.
 
+**Run d2 (21–22 Oct)**
+- Setup: 615 generations, warm-started from d1 gen 100 (ladder version 4).
+- It drifted steadily worse against both the rules and version 4 (training log −0.17 → −0.94 vs the rules, −0.5 → −1.17 vs version 4).
+- No snapshot beats version 4 (21 maps, head to head vs version 4): gen 50 20/42, gen 150 22/42, gen 300 19/42. Version 4 scores +0.533 vs the pool.
+- Cause, a winner's curse: elites are scored by their regressing lifetime averages, while newcomers are scored on a single noisy generation. Lucky newcomers displace proven networks, and since most mutations hurt, the population follows noise downhill.
+- Also: Syncthing was closed by Windows' hang detector at 17:39 on 21 Oct, so the training PC played no games after generation 157.
+
+**Champion-gated climb (`tools/director_climb.py`, from 22 Oct)**
+- The champion (initially version 4) plays a schedule; 12 NEAT-mutated challengers play the same games.
+- Each challenger is scored by its mean per-game difference from the champion, paired, so the schedule's difficulty cancels out.
+- The best challenger, if ahead by more than `--margin`, must beat the champion again on a fresh 24-entry schedule before it replaces it.
+- So the champion is always a proven network. Every promotion is saved under `champions/c###.json`.
+
 ## What gets learned
 
 | Piece | How |

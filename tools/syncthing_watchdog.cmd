@@ -1,5 +1,6 @@
 @echo off
-rem Syncthing watchdog (scheduled task "CAMBC Syncthing watchdog", every 15 minutes): start Syncthing if it is not
+rem Syncthing watchdog (scheduled task "CAMBC Syncthing watchdog", every 15 minutes during the 00:00-12:00 training
+rem window only): start Syncthing if it is not
 rem running. Syncthing carries the distributed-training queue (.arena/dist) to the training PC; on 19, 20 and 21 Oct
 rem Windows' hang detector closed it on this PC mid-run and the training PC sat idle for the rest of the night.
 rem Remove with:  schtasks /delete /tn "CAMBC Syncthing watchdog" /f

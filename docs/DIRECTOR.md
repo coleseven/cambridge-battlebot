@@ -213,6 +213,19 @@ Gen 100 is the first measured gain from learning the strategy layer. It is kept 
 - It must also not trail the anchor (`--anchor`, default the seed = version 4).
 - Screening margin 0.15.
 
+**Run c2 result (23–24 Oct)**
+- Setup: 367 generations, 4 promotions from 140 confirmations. The training PC played 14,225 games once Syncthing shared only `dist/`.
+- Champions on 61 maps:
+
+| Champion | Fitness | Head to head vs version 4 | Head to head vs rules |
+|---|---:|---:|---:|
+| c001 | +0.476 | 65/122, −7 gems | 70/122 |
+| c004 | +0.422 | 58/122, −31 gems | 66/122 |
+| version 4 | +0.543 | — | |
+
+- Version 4 stays. Four nights of director training have produced one measured gain (d1 gen 100).
+- The night alternates to fighters: `real_train.py run real3 --director-net <v4>`, so the fighters train inside the shipped director.
+
 **Syncthing (23 Oct)**
 - `.arena/.stignore` now shares only `dist/` and `jobs/`.
 - Before that, the whole of `.arena` synced, including the 377 MB per-PC results caches and the build folders. Re-hashing those under full training load got Syncthing closed as hung, and the training PC sat idle (19–23 Oct; 4 games on 22–23 Oct).

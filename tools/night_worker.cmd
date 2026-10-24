@@ -30,9 +30,12 @@ rem lifetime fitness, d1's gen-100 network as warm start and as an opponent; the
 rem 22 Oct: d2 drifted below its seed (winner's curse), so the night runs tools/director_climb.py run c1:
 rem champion-gated hill climb from version 4 (paired screening, fresh-game confirmation before promotion).
 rem 23 Oct: c1's 80 promotions drifted below version 4; run c2 needs a 2-standard-error lead on 64 fresh entries
-rem and no deficit to version 4 (the anchor). Earlier: d1, real1 / real2 (tools/real_train.py).
+rem and no deficit to version 4 (the anchor).
+rem 24 Oct: c2's champions did not beat version 4 either (55%/48% head to head), so the night alternates to
+rem the fighters: real3, real-map fighter training on engine 1.0.0 inside version 4 (bots/team-fight-train =
+rem team_bot.py --macro-src bots/director/src --source neat:real1 --set NN_HEROES=4095; --director-net v4's network). Earlier: d1, real1 / real2 (tools/real_train.py).
 if exist .arena\night_real.flag (
-  .venv\Scripts\python -u tools\director_climb.py run c2 --seed-net .arena/director/hall/d1-gen0100.json --team team-dirlearn --fighters neat:real1 --lam 12 --games 16 --confirm 64 --margin 0.15 --z 2 --jobs 12 --until 11:50 --dist .arena/dist >> .arena\director-night.log 2>&1
+  .venv\Scripts\python -u tools\real_train.py run real3 --warm-run real1 --team team-fight-train --director-net .arena/director/hall/d1-gen0100.json --pop 16 --games 6 --jobs 12 --until 11:50 --dist .arena/dist >> .arena\real-night.log 2>&1
 ) else (
   .venv\Scripts\python -u tools\dist_worker.py --root .arena/dist --jobs 12 --name nightpc --adopt-base --until 12:00 --margin 600 >> .arena\dist-night.log 2>&1
 )

@@ -66,6 +66,17 @@ def build_slots(d: Path, n: int):
     return out
 
 
+DIRECTOR_WORDS = None    # learned director network baked into every game of the run (--director-net), or None
+
+
+def with_dir(blob: bytes) -> bytes:
+    """The run's learned director network appended to a genome blob (training then matches what ships)."""
+    if not DIRECTOR_WORDS:
+        return blob
+    import director_train as dt          # local import: director_train imports this module
+    return dt.with_director(blob, DIRECTOR_WORDS)
+
+
 def opponent_bots(names, frozen_progs, ref_slot):
     """Opponents. Our own team-bot variants are BlobBots, so distributed workers can play them:
       frozen  our full bot with the networks this run started from
@@ -75,9 +86,9 @@ def opponent_bots(names, frozen_progs, ref_slot):
     out = {}
     for name in names:
         if name == "frozen":
-            out[name] = dist.virtual_bot(ref_slot, nvn.team_blob(nt, frozen_progs, 0), "frozen")
+            out[name] = dist.virtual_bot(ref_slot, with_dir(nvn.team_blob(nt, frozen_progs, 0)), "frozen")
         elif name == "prior":
-            out[name] = dist.virtual_bot(ref_slot, nvn.team_blob(nt, {}, 0), "prior")
+            out[name] = dist.virtual_bot(ref_slot, with_dir(nvn.team_blob(nt, {}, 0)), "prior")
         else:
             src = arena.ARENA / "realopp" / name
             if not (src / "src").exists():
@@ -176,6 +187,13 @@ def run(a):
         print(f"real-map run {a.name}: warm-started {len(st['pops'])} populations from {st['warm']}; "
               f"frozen start + team source saved", flush=True)
     shared = SharedCMA(d, a.cma, a.cma_pop, a.cma_sigma, a.cma_cap) if a.cma else None
+    global DIRECTOR_WORDS
+    dnf = d / "director_net.json"                # frozen with the run, like team_src
+    if a.director_net and not dnf.exists():
+        shutil.copy(a.director_net, dnf)
+    if dnf.exists():
+        DIRECTOR_WORDS = json.loads(dnf.read_text(encoding="utf-8"))["words"]
+        print(f"learned director network in every game ({len(DIRECTOR_WORDS)} words)", flush=True)
     frozen_progs = nvn.load_programs(d / "frozen_start.json")
     slots = build_slots(d, max(2, 2 * a.jobs))
     opps = opponent_bots(a.opps, frozen_progs, slots[0])
@@ -203,7 +221,7 @@ def run(a):
             sched = schedule(gen, p, a.games, list(opps), maps)
             for gi, (gid, g) in enumerate(items_of[p]):
                 prog = nt.program(g, pop.config)
-                blob = nvn.team_blob(nt, team, 0, p, prog)
+                blob = with_dir(nvn.team_blob(nt, team, 0, p, prog))
                 for j, (m, oname, seat, comp) in enumerate(sched):
                     b = tb.blob_with_draft(blob, comp)
                     if shared:
@@ -272,6 +290,8 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("name")
     r.add_argument("--warm-run", default="n3v3")
+    r.add_argument("--director-net", default="", help="learned director network (best.json) for every game; "
+                   "copied into the run on its first generation")
     r.add_argument("--team", default="team", help="generated combined bot (bots/<team>) whose source the run "
                    "freezes as team_src on its first generation, e.g. team-director (tools/team_bot.py)")
     r.add_argument("--warm-arena", default="")

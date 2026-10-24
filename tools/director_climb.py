@@ -8,8 +8,11 @@ Each generation:
   1. The champion (a director network; first the seed) plays a schedule of S (map, opponent) entries, both seats.
   2. L challengers (NEAT mutations of the champion; sometimes of the runner-up) play the SAME games; each is scored
      by its mean per-game difference from the champion (paired, so the schedule's difficulty cancels out).
-  3. The best challenger, if ahead by more than --margin, is re-tested on a FRESH schedule against the champion;
-     it replaces the champion only if it is ahead there too. The champion is therefore always a proven network.
+  3. The best challenger, if ahead by more than --margin, is re-tested on a FRESH schedule (--confirm entries) against
+     the champion AND the anchor (--anchor, the network we ship). It replaces the champion only if its lead over the
+     champion exceeds --z standard errors of the per-game differences, and it is not behind the anchor. (23 Oct: c1
+     promoted on "ahead at all" over 48 games; 80 promotions mostly accumulated small losses and every champion
+     ended below its seed, version 4.)
 
   .venv/Scripts/python tools/director_climb.py run c1 --seed-net .arena/director/hall/d1-gen0100.json
         [--team team-dirlearn] [--fighters neat:real1] [--lam 12] [--games 16] [--confirm 24] [--margin 0.05]
@@ -110,6 +113,7 @@ def run(a):
     _, fw = bf.blob_words(league.programs(st["fighters"], 3), 0)
     fblob = struct.pack(f"<{len(fw)}I", *fw)
     opps = opponents(a.opps, slots, fblob)
+    anchor_words = json.loads(Path(a.anchor or st["seed"]).read_text(encoding="utf-8"))["words"]
     maps = arena.all_maps()
     stop_at = rt.deadline(a.until) if a.until else None
     log = d / "log.jsonl"
@@ -140,19 +144,29 @@ def run(a):
         diffs = sorted(((sum(x - y for x, y in zip(scores[f"c{i}"], base)) / len(base), i)
                         for i in range(len(chall))), reverse=True)
         promoted, confirm_diff = False, None
+        anchor_diff = None
         if diffs and diffs[0][0] > a.margin:
             bi = diffs[0][1]
             fresh = sched(f"confirm:{gen}", a.confirm, list(opps), maps)
-            cs, e2 = play([("champ", champ_words), ("cand", chall[bi][1])], fresh, opps, slots, fblob, a)
+            nets = [("champ", champ_words), ("cand", chall[bi][1])]
+            if anchor_words != champ_words:
+                nets.append(("anchor", anchor_words))
+            cs, e2 = play(nets, fresh, opps, slots, fblob, a)
             errs += e2
-            confirm_diff = sum(x - y for x, y in zip(cs["cand"], cs["champ"])) / len(cs["champ"])
-            if confirm_diff > 0:
+            dl = [x - y for x, y in zip(cs["cand"], cs["champ"])]
+            confirm_diff = sum(dl) / len(dl)
+            var = sum((x - confirm_diff) ** 2 for x in dl) / max(1, len(dl) - 1)
+            se = (var / len(dl)) ** 0.5
+            ref = cs.get("anchor", cs["champ"])
+            anchor_diff = sum(x - y for x, y in zip(cs["cand"], ref)) / len(ref)
+            if confirm_diff > a.z * se and anchor_diff >= 0:
                 st["runner"] = st["champ"]
                 st["champ"] = chall[bi][0]
                 st["promotions"] += 1
                 promoted = True
                 rec = {"gen": gen, "promotion": st["promotions"], "screen": round(diffs[0][0], 3),
-                       "confirm": round(confirm_diff, 3), "nfd": dt.NFD, "words": chall[bi][1]}
+                       "confirm": round(confirm_diff, 3), "se": round(se, 3), "vs_anchor": round(anchor_diff, 3),
+                       "nfd": dt.NFD, "words": chall[bi][1]}
                 (d / "champions").mkdir(exist_ok=True)
                 (d / "champions" / f"c{st['promotions']:03d}.json").write_text(json.dumps(rec), encoding="utf-8")
         if not promoted and len(diffs) > 1 and diffs[0][0] > 0:
@@ -173,10 +187,12 @@ def run(a):
             fh.write(json.dumps({"gen": gen, "secs": round(secs), "errors": errs, "champ_score": round(champ_mean, 3),
                                  "best_diff": round(diffs[0][0], 3) if diffs else None,
                                  "confirm": None if confirm_diff is None else round(confirm_diff, 3),
+                                 "vs_anchor": None if anchor_diff is None else round(anchor_diff, 3),
                                  "promoted": promoted, "promotions": st["promotions"],
                                  **({"dist": dist.take_stats(a.dist)} if a.dist else {})}) + "\n")
         print(f"gen {gen:4} climb  {secs:5.0f}s  errors {errs}  champion {champ_mean:+.3f}  best challenger "
               f"{(diffs[0][0] if diffs else 0):+.3f}" + (f"  confirm {confirm_diff:+.3f}" if confirm_diff is not None else "")
+              + (f" vs anchor {anchor_diff:+.3f}" if anchor_diff is not None else "")
               + (f"  PROMOTED (#{st['promotions']})" if promoted else ""), flush=True)
 
 
@@ -197,8 +213,10 @@ def main():
     r.add_argument("--fighters", default="neat:real1")
     r.add_argument("--lam", type=int, default=12, help="challengers per generation")
     r.add_argument("--games", type=int, default=16, help="screening schedule entries (each both seats)")
-    r.add_argument("--confirm", type=int, default=24, help="fresh confirmation entries (each both seats)")
-    r.add_argument("--margin", type=float, default=0.05, help="screening lead needed to try a confirmation")
+    r.add_argument("--confirm", type=int, default=64, help="fresh confirmation entries (each both seats)")
+    r.add_argument("--margin", type=float, default=0.15, help="screening lead needed to try a confirmation")
+    r.add_argument("--z", type=float, default=2.0, help="confirmation lead needed, in standard errors")
+    r.add_argument("--anchor", default="", help="network a promotion must not trail (default: the seed)")
     r.add_argument("--mut", type=float, default=0.15)
     r.add_argument("--opps", nargs="+", default=["rules", "net:.arena/director/hall/d1-gen0100.json", "sparring-tarot",
                                                   "v1", "forager", "starter-cpp"])

@@ -202,6 +202,21 @@ Gen 100 is the first measured gain from learning the strategy layer. It is kept 
 - The best challenger, if ahead by more than `--margin`, must beat the champion again on a fresh 24-entry schedule before it replaces it.
 - So the champion is always a proven network. Every promotion is saved under `champions/c###.json`.
 
+**Run c1 (22–23 Oct)**
+- Setup: 375 generations; 80 promotions out of 209 confirmations, each needing only "ahead" on 48 fresh games.
+- Champions vs version 4 (61 maps, head to head): c020 55/122, c040 53/122, c080 56/122. Fitness +0.36/+0.37, against version 4's +0.543.
+- Promoting on "ahead at all" let slightly worse mutations through by luck about 40% of the time, so the champion drifted down.
+
+**Run c2 (from 23 Oct)**
+- Confirmation on 64 fresh entries (128 games).
+- The challenger must lead the champion by 2 standard errors of the per-game differences.
+- It must also not trail the anchor (`--anchor`, default the seed = version 4).
+- Screening margin 0.15.
+
+**Syncthing (23 Oct)**
+- `.arena/.stignore` now shares only `dist/` and `jobs/`.
+- Before that, the whole of `.arena` synced, including the 377 MB per-PC results caches and the build folders. Re-hashing those under full training load got Syncthing closed as hung, and the training PC sat idle (19–23 Oct; 4 games on 22–23 Oct).
+
 ## What gets learned
 
 | Piece | How |

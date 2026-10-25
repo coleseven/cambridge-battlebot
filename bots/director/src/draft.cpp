@@ -17,7 +17,7 @@ namespace {
 // Marcella 2 gold per tributed gem matter now that many games reach round 2,000 and lifetime gold breaks ties;
 // Willow buffed; Heart of Ruin new). On 3- and 4-champion maps only the first picks are used.
 using D = champion_draft;
-constexpr std::array<std::array<champion_draft, 5>, 10> COMPS{{
+constexpr std::array<std::array<champion_draft, 5>, 11> COMPS{{
     {D::varg, D::cassi_and_issac, D::stellar, D::ren, D::tavi},
     {D::cassi_and_issac, D::varg, D::stellar, D::ren, D::ryth},
     {D::varg, D::stellar, D::ren, D::ryth, D::vendetta},
@@ -28,6 +28,8 @@ constexpr std::array<std::array<champion_draft, 5>, 10> COMPS{{
     {D::marcella, D::vesper_vale, D::willow, D::ryth, D::varg},
     {D::cassi_and_issac, D::varg, D::ren, D::willow, D::marcella},
     {D::vesper_vale, D::marcella, D::cassi_and_issac, D::stellar, D::heart_of_ruin},
+    // 10: the ladder meta after the patch (25 Oct, top 15 teams: Heart of Ruin + Vesper Vale + Marcella/Vendetta).
+    {D::heart_of_ruin, D::vesper_vale, D::marcella, D::vendetta, D::ryth},
 }};
 
 // Physical body types created by a draft pick (C&I creates two bodies).
